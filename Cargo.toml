@@ -4,6 +4,7 @@ members = [
     "crates/domain",
     "crates/shared",
     "crates/resilience",
+    "services/catalog",
 ]
 
 [workspace.package]
@@ -21,3 +22,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 dotenvy = "0.15"
+anyhow = "1"
+axum = "0.8"
+
+domain = { path = "crates/domain" }
+shared = { path = "crates/shared" }
+resilience = { path = "crates/resilience" }
