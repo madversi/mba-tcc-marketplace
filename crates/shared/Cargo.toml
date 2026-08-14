@@ -7,4 +7,5 @@ publish.workspace = true
 
 [dependencies]
 dotenvy = { workspace = true }
+sqlx = { workspace = true }
 thiserror = { workspace = true }

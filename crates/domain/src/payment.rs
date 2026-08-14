@@ -44,7 +44,7 @@ pub struct Payment {
 
 impl Payment {
     pub fn new(order_id: Uuid, amount_cents: i64) -> Result<Self, DomainError> {
-        let now = Utc::now();
+        let now = crate::time::now();
         Ok(Self {
             id: Uuid::new_v4(),
             order_id,
@@ -73,7 +73,7 @@ impl Payment {
         }
         self.status = next;
         self.failure_reason = reason;
-        self.updated_at = Utc::now();
+        self.updated_at = crate::time::now();
         Ok(())
     }
 }

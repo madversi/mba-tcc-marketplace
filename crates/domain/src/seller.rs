@@ -21,7 +21,7 @@ impl Seller {
             id: Uuid::new_v4(),
             name,
             email,
-            created_at: Utc::now(),
+            created_at: crate::time::now(),
         })
     }
 }

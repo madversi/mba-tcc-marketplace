@@ -33,6 +33,10 @@ Sobe o PostgreSQL com um database por serviço (`catalog`, `inventory`,
 na primeira inicialização. Credenciais padrão `marketplace`/`marketplace`;
 para alterar, copie `docker/.env.example` para `docker/.env`.
 
+> Se já existir um PostgreSQL instalado na máquina ocupando a porta 5432, defina
+> `POSTGRES_PORT=5433` em `docker/.env` e ajuste a porta na `DATABASE_URL` do
+> `.env` da raiz.
+
 Para conferir os databases criados:
 
 ```bash

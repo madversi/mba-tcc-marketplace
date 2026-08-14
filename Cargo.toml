@@ -24,6 +24,7 @@ thiserror = "2"
 dotenvy = "0.15"
 anyhow = "1"
 axum = "0.8"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "chrono"] }
 
 domain = { path = "crates/domain" }
 shared = { path = "crates/shared" }

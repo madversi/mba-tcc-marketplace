@@ -25,7 +25,7 @@ impl Product {
         description: Option<String>,
         price_cents: i64,
     ) -> Result<Self, DomainError> {
-        let now = Utc::now();
+        let now = crate::time::now();
 
         Ok(Self {
             id: Uuid::new_v4(),
@@ -43,13 +43,13 @@ impl Product {
 
     pub fn update_price(&mut self, price_cents: i64) -> Result<(), DomainError> {
         self.price = Money::positive(price_cents)?;
-        self.updated_at = Utc::now();
+        self.updated_at = crate::time::now();
         Ok(())
     }
 
     pub fn deactivate(&mut self) {
         self.active = false;
-        self.updated_at = Utc::now();
+        self.updated_at = crate::time::now();
     }
 }
 

@@ -18,7 +18,7 @@ impl StockItem {
             product_id,
             available,
             reserved: 0,
-            updated_at: Utc::now(),
+            updated_at: crate::time::now(),
         }
     }
 
@@ -72,7 +72,7 @@ impl StockItem {
     }
 
     fn touch(&mut self) {
-        self.updated_at = Utc::now();
+        self.updated_at = crate::time::now();
     }
 }
 

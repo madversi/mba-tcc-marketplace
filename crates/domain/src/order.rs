@@ -97,7 +97,7 @@ impl Order {
             .iter()
             .try_fold(Money::ZERO, |acc, item| acc.checked_add(item.subtotal()?))?;
 
-        let now = Utc::now();
+        let now = crate::time::now();
         Ok(Self {
             id: Uuid::new_v4(),
             buyer_id,
@@ -133,7 +133,7 @@ impl Order {
             });
         }
         self.status = next;
-        self.updated_at = Utc::now();
+        self.updated_at = crate::time::now();
         Ok(())
     }
 }

@@ -5,6 +5,7 @@ pub mod payment;
 pub mod product;
 pub mod seller;
 pub mod stock;
+pub mod time;
 
 pub use error::DomainError;
 pub use money::Money;
