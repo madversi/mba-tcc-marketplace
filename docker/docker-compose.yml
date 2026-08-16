@@ -21,5 +21,30 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  catalog:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: catalog
+    image: marketplace/catalog
+    container_name: marketplace-catalog
+    environment:
+      HTTP_PORT: 8080
+      LOG_FORMAT: json
+      DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/catalog
+    ports:
+      - "8081:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
 volumes:
   postgres-data:
