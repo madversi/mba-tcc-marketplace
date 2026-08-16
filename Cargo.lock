@@ -152,10 +152,13 @@ dependencies = [
  "axum",
  "chrono",
  "domain",
+ "http-body-util",
  "serde",
+ "serde_json",
  "shared",
  "sqlx",
  "tokio",
+ "tower",
  "uuid",
 ]
 

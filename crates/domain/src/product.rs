@@ -47,6 +47,24 @@ impl Product {
         Ok(())
     }
 
+    pub fn rename(&mut self, name: impl Into<String>) -> Result<(), DomainError> {
+        self.name = non_empty(name.into(), "nome do produto")?;
+        self.updated_at = crate::time::now();
+        Ok(())
+    }
+
+    pub fn set_description(&mut self, description: Option<String>) {
+        self.description = description
+            .map(|d| d.trim().to_owned())
+            .filter(|d| !d.is_empty());
+        self.updated_at = crate::time::now();
+    }
+
+    pub fn activate(&mut self) {
+        self.active = true;
+        self.updated_at = crate::time::now();
+    }
+
     pub fn deactivate(&mut self) {
         self.active = false;
         self.updated_at = crate::time::now();
@@ -56,6 +74,32 @@ impl Product {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn renomeia_e_altera_descricao() {
+        let mut product = Product::new(Uuid::new_v4(), "Teclado", None, 100).unwrap();
+
+        product.rename("  Teclado Mecânico ").unwrap();
+        product.set_description(Some("  RGB ".to_owned()));
+
+        assert_eq!(product.name, "Teclado Mecânico");
+        assert_eq!(product.description.as_deref(), Some("RGB"));
+
+        product.set_description(Some("   ".to_owned()));
+        assert_eq!(product.description, None);
+
+        assert!(product.rename("").is_err());
+    }
+
+    #[test]
+    fn reativa_produto() {
+        let mut product = Product::new(Uuid::new_v4(), "Teclado", None, 100).unwrap();
+
+        product.deactivate();
+        product.activate();
+
+        assert!(product.active);
+    }
 
     #[test]
     fn cria_produto_ativo_com_preco_valido() {

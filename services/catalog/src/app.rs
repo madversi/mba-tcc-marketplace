@@ -8,6 +8,7 @@ use serde::Serialize;
 use shared::AppConfig;
 use sqlx::PgPool;
 
+use crate::handlers::{products, sellers};
 use crate::repository::{ProductRepository, SellerRepository};
 
 #[derive(Clone)]
@@ -32,6 +33,16 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/sellers", get(sellers::list).post(sellers::create))
+        .route("/sellers/{id}", get(sellers::get))
+        .route("/sellers/{id}/products", get(sellers::list_products))
+        .route("/products", get(products::list).post(products::create))
+        .route(
+            "/products/{id}",
+            get(products::get)
+                .patch(products::update)
+                .delete(products::delete),
+        )
         .with_state(state)
 }
 
