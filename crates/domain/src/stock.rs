@@ -22,6 +22,11 @@ impl StockItem {
         }
     }
 
+    pub fn set_available(&mut self, quantity: u32) {
+        self.available = quantity;
+        self.touch();
+    }
+
     pub fn add(&mut self, quantity: u32) -> Result<(), DomainError> {
         ensure_positive(quantity)?;
         self.available = self.available.saturating_add(quantity);

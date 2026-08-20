@@ -5,8 +5,9 @@ use domain::Product;
 use serde::Deserialize;
 use uuid::Uuid;
 
+use shared::ApiError;
+
 use crate::app::AppState;
-use crate::error::ApiError;
 
 #[derive(Deserialize)]
 pub struct CreateProduct {

@@ -2,29 +2,27 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use shared::api::Health;
 use shared::AppConfig;
 use sqlx::PgPool;
 
-use crate::handlers::{products, sellers};
-use crate::repository::{ProductRepository, SellerRepository};
+use crate::handlers;
+use crate::repository::StockRepository;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub pool: PgPool,
-    pub sellers: SellerRepository,
-    pub products: ProductRepository,
+    pub stock: StockRepository,
 }
 
 impl AppState {
     pub fn new(config: AppConfig, pool: PgPool) -> Self {
         Self {
             config: Arc::new(config),
-            sellers: SellerRepository::new(pool.clone()),
-            products: ProductRepository::new(pool.clone()),
+            stock: StockRepository::new(pool.clone()),
             pool,
         }
     }
@@ -33,16 +31,13 @@ impl AppState {
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
-        .route("/sellers", get(sellers::list).post(sellers::create))
-        .route("/sellers/{id}", get(sellers::get))
-        .route("/sellers/{id}/products", get(sellers::list_products))
-        .route("/products", get(products::list).post(products::create))
         .route(
-            "/products/{id}",
-            get(products::get)
-                .patch(products::update)
-                .delete(products::delete),
+            "/stock/{product_id}",
+            get(handlers::get).put(handlers::set_available),
         )
+        .route("/stock/{product_id}/reserve", post(handlers::reserve))
+        .route("/stock/{product_id}/release", post(handlers::release))
+        .route("/stock/{product_id}/commit", post(handlers::commit))
         .with_state(state)
 }
 
