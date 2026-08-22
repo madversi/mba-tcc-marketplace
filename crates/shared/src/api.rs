@@ -10,6 +10,7 @@ pub enum ApiError {
     NotFound(&'static str),
     Validation(String),
     Conflict(String),
+    Unavailable(String),
     Internal(sqlx::Error),
 }
 
@@ -24,6 +25,7 @@ impl IntoResponse for ApiError {
             Self::NotFound(what) => (StatusCode::NOT_FOUND, format!("{what} não encontrado")),
             Self::Validation(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg),
             Self::Conflict(msg) => (StatusCode::CONFLICT, msg),
+            Self::Unavailable(msg) => (StatusCode::SERVICE_UNAVAILABLE, msg),
             Self::Internal(err) => {
                 eprintln!("erro interno: {err}");
                 (StatusCode::INTERNAL_SERVER_ERROR, "erro interno".to_owned())

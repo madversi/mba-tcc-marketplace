@@ -31,6 +31,19 @@ impl fmt::Display for PaymentStatus {
     }
 }
 
+impl std::str::FromStr for PaymentStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "PENDING" => Ok(Self::Pending),
+            "APPROVED" => Ok(Self::Approved),
+            "FAILED" => Ok(Self::Failed),
+            other => Err(format!("status de pagamento desconhecido: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Payment {
     pub id: Uuid,
@@ -96,6 +109,18 @@ mod tests {
             Payment::new(Uuid::new_v4(), 0).unwrap_err(),
             DomainError::NonPositiveAmount(0)
         );
+    }
+
+    #[test]
+    fn status_faz_round_trip_por_string() {
+        for status in [
+            PaymentStatus::Pending,
+            PaymentStatus::Approved,
+            PaymentStatus::Failed,
+        ] {
+            assert_eq!(status.as_str().parse::<PaymentStatus>(), Ok(status));
+        }
+        assert!("CANCELLED".parse::<PaymentStatus>().is_err());
     }
 
     #[test]
