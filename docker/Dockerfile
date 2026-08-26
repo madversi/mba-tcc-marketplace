@@ -9,10 +9,10 @@ COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 FROM chef AS builder
-ARG SERVICE
 COPY --from=planner /app/recipe.json recipe.json
 RUN cargo chef cook --release --recipe-path recipe.json
 COPY . .
+ARG SERVICE
 RUN cargo build --release -p ${SERVICE} \
     && cp target/release/${SERVICE} /usr/local/bin/service
 

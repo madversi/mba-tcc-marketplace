@@ -22,16 +22,31 @@ orquestrado via Docker Compose.
 
 ## Executando
 
-### Infraestrutura (Docker)
+### Stack completa (Docker)
 
 ```bash
-docker compose -f docker/docker-compose.yml up -d
+docker compose -f docker/docker-compose.yml up -d --build
 ```
 
-Sobe o PostgreSQL com um database por serviço (`catalog`, `inventory`,
-`payments`, `orders`), criados pelo script `docker/postgres/init-databases.sql`
-na primeira inicialização. Credenciais padrão `marketplace`/`marketplace`;
-para alterar, copie `docker/.env.example` para `docker/.env`.
+Sobe o PostgreSQL e os 4 serviços, cada um construído a partir do mesmo
+`docker/Dockerfile` (multi-stage com `cargo-chef`; a camada de dependências é
+compartilhada entre eles). Os serviços só iniciam depois do Postgres passar no
+healthcheck e aplicam as próprias migrations ao subir.
+
+| Serviço | Porta no host | Health |
+|---|---|---|
+| `catalog` | 8081 | `curl localhost:8081/health` |
+| `orders` | 8082 | `curl localhost:8082/health` |
+| `inventory` | 8083 | `curl localhost:8083/health` |
+| `payments` | 8084 | `curl localhost:8084/health` |
+
+Dentro da rede do compose os serviços se falam pelo nome (`orders` chama
+`http://catalog:8080`); as portas acima são só o mapeamento para o host.
+
+O PostgreSQL tem um database por serviço (`catalog`, `inventory`, `payments`,
+`orders`), criados pelo script `docker/postgres/init-databases.sql` na primeira
+inicialização. Credenciais padrão `marketplace`/`marketplace`; para alterar,
+copie `docker/.env.example` para `docker/.env`.
 
 > Se já existir um PostgreSQL instalado na máquina ocupando a porta 5432, defina
 > `POSTGRES_PORT=5433` em `docker/.env` e ajuste a porta na `DATABASE_URL` do
@@ -46,12 +61,15 @@ docker exec marketplace-postgres psql -U marketplace -l
 ### Serviços (local)
 
 Cada serviço é um binário do workspace e lê sua configuração de variáveis de
-ambiente (veja `.env.example`). A porta padrão é 8080; para rodar mais de um
-serviço ao mesmo tempo, defina `HTTP_PORT`:
+ambiente (`.env` na raiz é carregado automaticamente). Para rodar um serviço
+fora do Docker, defina a porta e o database dele:
 
 ```bash
-HTTP_PORT=8081 cargo run -p catalog
+HTTP_PORT=8081 DATABASE_URL=postgres://marketplace:marketplace@localhost:5433/catalog cargo run -p catalog
 ```
+
+No PowerShell: `$env:HTTP_PORT=8081; $env:DATABASE_URL="..."; cargo run -p catalog`.
+O `orders` também precisa de `CATALOG_URL` (ex.: `http://localhost:8081`).
 
 ```bash
 curl localhost:8081/health
@@ -65,5 +83,6 @@ cargo test
 
 ## Status
 
-Projeto em desenvolvimento inicial. Os serviços, a mensageria e os
-cenários de teste serão adicionados nas próximas fases.
+Os 4 serviços rodam de forma independente (REST + PostgreSQL). Ainda não há
+comunicação assíncrona entre eles: a saga de compra via RabbitMQ, o log
+estruturado, as métricas e os padrões de resiliência entram nas próximas fases.

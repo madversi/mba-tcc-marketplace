@@ -1,5 +1,23 @@
 name: marketplace
 
+x-service: &service
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  environment: &service-env
+    HTTP_PORT: 8080
+    LOG_FORMAT: json
+  depends_on:
+    postgres:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+    interval: 10s
+    timeout: 3s
+    retries: 5
+    start_period: 5s
+  restart: unless-stopped
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -22,6 +40,7 @@ services:
     restart: unless-stopped
 
   catalog:
+    <<: *service
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -30,21 +49,61 @@ services:
     image: marketplace/catalog
     container_name: marketplace-catalog
     environment:
-      HTTP_PORT: 8080
-      LOG_FORMAT: json
+      <<: *service-env
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/catalog
     ports:
       - "8081:8080"
+
+  orders:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: orders
+    image: marketplace/orders
+    container_name: marketplace-orders
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/orders
+      CATALOG_URL: http://catalog:8080
+    ports:
+      - "8082:8080"
     depends_on:
       postgres:
         condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
-    restart: unless-stopped
+      catalog:
+        condition: service_healthy
+
+  inventory:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: inventory
+    image: marketplace/inventory
+    container_name: marketplace-inventory
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/inventory
+    ports:
+      - "8083:8080"
+
+  payments:
+    <<: *service
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        SERVICE: payments
+    image: marketplace/payments
+    container_name: marketplace-payments
+    environment:
+      <<: *service-env
+      DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/payments
+    ports:
+      - "8084:8080"
 
 volumes:
   postgres-data:
