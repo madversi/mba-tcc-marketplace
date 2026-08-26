@@ -21,22 +21,22 @@ pub fn env_vars() -> EnvVars {
     std::env::vars().collect()
 }
 
-fn get<'a>(vars: &'a EnvVars, key: &str) -> Option<&'a str> {
+pub fn optional<'a>(vars: &'a EnvVars, key: &str) -> Option<&'a str> {
     vars.get(key).map(String::as_str).filter(|v| !v.is_empty())
 }
 
-fn required(vars: &EnvVars, key: &'static str) -> Result<String, ConfigError> {
-    get(vars, key)
+pub fn required(vars: &EnvVars, key: &'static str) -> Result<String, ConfigError> {
+    optional(vars, key)
         .map(str::to_owned)
         .ok_or(ConfigError::Missing(key))
 }
 
-fn parse_or<T>(vars: &EnvVars, key: &'static str, default: T) -> Result<T, ConfigError>
+pub fn parse_or<T>(vars: &EnvVars, key: &'static str, default: T) -> Result<T, ConfigError>
 where
     T: FromStr,
     T::Err: std::fmt::Display,
 {
-    match get(vars, key) {
+    match optional(vars, key) {
         None => Ok(default),
         Some(raw) => raw.parse().map_err(|e: T::Err| ConfigError::Invalid {
             key,
@@ -61,10 +61,10 @@ impl AppConfig {
 
     pub fn from_source(vars: &EnvVars, default_service_name: &str) -> Result<Self, ConfigError> {
         Ok(Self {
-            service_name: get(vars, "SERVICE_NAME")
+            service_name: optional(vars, "SERVICE_NAME")
                 .unwrap_or(default_service_name)
                 .to_owned(),
-            host: get(vars, "HTTP_HOST").unwrap_or("0.0.0.0").to_owned(),
+            host: optional(vars, "HTTP_HOST").unwrap_or("0.0.0.0").to_owned(),
             port: parse_or(vars, "HTTP_PORT", 8080)?,
             log: LogConfig::from_source(vars)?,
         })
@@ -84,8 +84,8 @@ pub struct LogConfig {
 impl LogConfig {
     pub fn from_source(vars: &EnvVars) -> Result<Self, ConfigError> {
         Ok(Self {
-            level: get(vars, "LOG_LEVEL")
-                .or_else(|| get(vars, "RUST_LOG"))
+            level: optional(vars, "LOG_LEVEL")
+                .or_else(|| optional(vars, "RUST_LOG"))
                 .unwrap_or("info")
                 .to_owned(),
             format: parse_or(vars, "LOG_FORMAT", LogFormat::Pretty)?,
@@ -147,7 +147,7 @@ impl AmqpConfig {
     pub fn from_source(vars: &EnvVars) -> Result<Self, ConfigError> {
         Ok(Self {
             url: required(vars, "AMQP_URL")?,
-            exchange: get(vars, "AMQP_EXCHANGE")
+            exchange: optional(vars, "AMQP_EXCHANGE")
                 .unwrap_or("marketplace")
                 .to_owned(),
             prefetch: parse_or(vars, "AMQP_PREFETCH", 16)?,

@@ -17,6 +17,9 @@ pub enum DomainError {
     #[error("pedido deve conter ao menos um item")]
     EmptyOrder,
 
+    #[error("produto {product_id} aparece mais de uma vez no pedido")]
+    DuplicateItem { product_id: Uuid },
+
     #[error(
         "estoque insuficiente para o produto {product_id}: disponível {available}, solicitado {requested}"
     )]

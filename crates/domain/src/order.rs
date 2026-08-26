@@ -52,6 +52,21 @@ impl fmt::Display for OrderStatus {
     }
 }
 
+impl std::str::FromStr for OrderStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "PENDING" => Ok(Self::Pending),
+            "STOCK_RESERVED" => Ok(Self::StockReserved),
+            "PAYMENT_PENDING" => Ok(Self::PaymentPending),
+            "CONFIRMED" => Ok(Self::Confirmed),
+            "CANCELLED" => Ok(Self::Cancelled),
+            other => Err(format!("status de pedido desconhecido: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OrderItem {
     pub product_id: Uuid,
@@ -91,6 +106,13 @@ impl Order {
     pub fn new(buyer_id: Uuid, items: Vec<OrderItem>) -> Result<Self, DomainError> {
         if items.is_empty() {
             return Err(DomainError::EmptyOrder);
+        }
+
+        let mut seen = std::collections::HashSet::new();
+        if let Some(dup) = items.iter().find(|item| !seen.insert(item.product_id)) {
+            return Err(DomainError::DuplicateItem {
+                product_id: dup.product_id,
+            });
         }
 
         let total = items
@@ -168,6 +190,34 @@ mod tests {
             OrderItem::new(Uuid::new_v4(), 0, Money::from_cents(1)).unwrap_err(),
             DomainError::ZeroQuantity
         );
+    }
+
+    #[test]
+    fn rejeita_produto_repetido() {
+        let product_id = Uuid::new_v4();
+        let items = vec![
+            OrderItem::new(product_id, 1, Money::from_cents(100)).unwrap(),
+            OrderItem::new(product_id, 2, Money::from_cents(100)).unwrap(),
+        ];
+
+        assert_eq!(
+            Order::new(Uuid::new_v4(), items).unwrap_err(),
+            DomainError::DuplicateItem { product_id }
+        );
+    }
+
+    #[test]
+    fn status_faz_round_trip_por_string() {
+        for status in [
+            OrderStatus::Pending,
+            OrderStatus::StockReserved,
+            OrderStatus::PaymentPending,
+            OrderStatus::Confirmed,
+            OrderStatus::Cancelled,
+        ] {
+            assert_eq!(status.as_str().parse::<OrderStatus>(), Ok(status));
+        }
+        assert!("PAID".parse::<OrderStatus>().is_err());
     }
 
     #[test]
