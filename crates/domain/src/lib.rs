@@ -1,4 +1,5 @@
 pub mod error;
+pub mod events;
 pub mod money;
 pub mod order;
 pub mod payment;

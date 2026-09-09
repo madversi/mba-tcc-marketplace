@@ -37,6 +37,7 @@ impl OrderStatus {
             (self, next),
             (Pending, StockReserved)
                 | (Pending, Cancelled)
+                | (Pending, Confirmed)
                 | (StockReserved, Confirmed)
                 | (StockReserved, PaymentPending)
                 | (StockReserved, Cancelled)
@@ -284,16 +285,12 @@ mod tests {
     }
 
     #[test]
-    fn nao_confirma_sem_reservar_estoque() {
+    fn confirma_diretamente_de_pending() {
         let mut order = order();
 
-        assert_eq!(
-            order.confirm().unwrap_err(),
-            DomainError::InvalidTransition {
-                from: "PENDING",
-                to: "CONFIRMED"
-            }
-        );
+        order.confirm().unwrap();
+
+        assert_eq!(order.status, OrderStatus::Confirmed);
     }
 
     #[test]

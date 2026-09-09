@@ -1,6 +1,7 @@
 use payments::app::{router, AppState};
+use payments::consumer;
 use payments::gateway::SimulatedGateway;
-use shared::{AppConfig, DatabaseConfig};
+use shared::{AmqpConfig, AppConfig, DatabaseConfig, EventBus};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -10,8 +11,17 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = shared::db::connect(&DatabaseConfig::from_env()?).await?;
     sqlx::migrate!().run(&pool).await?;
+    let bus = EventBus::connect(&AmqpConfig::from_env()?).await?;
 
     let state = AppState::new(config, pool, SimulatedGateway);
+    let _consumer = consumer::spawn(
+        bus,
+        state.payments.clone(),
+        state.gateway.clone(),
+        "payments",
+    )
+    .await?;
+
     let listener = TcpListener::bind(&addr).await?;
     println!("{} ouvindo em http://{addr}", state.config.service_name);
 

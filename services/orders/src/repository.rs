@@ -1,7 +1,15 @@
 use chrono::{DateTime, Utc};
-use domain::{Money, Order, OrderItem, OrderStatus};
+use domain::{DomainError, Money, Order, OrderItem, OrderStatus};
 use sqlx::{FromRow, PgPool};
 use uuid::Uuid;
+
+#[derive(Debug, thiserror::Error)]
+pub enum OrderError {
+    #[error(transparent)]
+    Domain(#[from] DomainError),
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
 
 #[derive(FromRow)]
 struct OrderRow {
@@ -117,6 +125,51 @@ impl OrderRepository {
 
         build_order(row, items).map(Some)
     }
+
+    pub async fn transition(
+        &self,
+        order_id: Uuid,
+        apply: impl FnOnce(&mut Order) -> Result<(), DomainError>,
+    ) -> Result<Option<Order>, OrderError> {
+        let mut tx = self.pool.begin().await?;
+
+        let Some(row) = sqlx::query_as::<_, OrderRow>(
+            "SELECT id, buyer_id, status, total_cents, created_at, updated_at \
+             FROM orders WHERE id = $1 FOR UPDATE",
+        )
+        .bind(order_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let status = row
+            .status
+            .parse::<OrderStatus>()
+            .map_err(|e| sqlx::Error::Decode(e.into()))?;
+        let mut order = Order {
+            id: row.id,
+            buyer_id: row.buyer_id,
+            items: Vec::new(),
+            total: Money::from_cents(row.total_cents),
+            status,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        };
+
+        apply(&mut order)?;
+
+        sqlx::query("UPDATE orders SET status = $2, updated_at = $3 WHERE id = $1")
+            .bind(order.id)
+            .bind(order.status.as_str())
+            .bind(order.updated_at)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(Some(order))
+    }
 }
 
 #[cfg(test)]
@@ -148,5 +201,53 @@ mod tests {
         let repo = OrderRepository::new(pool);
 
         assert_eq!(repo.find_by_id(Uuid::new_v4()).await.unwrap(), None);
+    }
+
+    #[sqlx::test]
+    async fn transition_aplica_e_persiste(pool: PgPool) {
+        let repo = OrderRepository::new(pool);
+        let order = order();
+        repo.insert(&order).await.unwrap();
+
+        let updated = repo
+            .transition(order.id, |o| o.mark_stock_reserved())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.status, OrderStatus::StockReserved);
+
+        let found = repo.find_by_id(order.id).await.unwrap().unwrap();
+        assert_eq!(found.status, OrderStatus::StockReserved);
+    }
+
+    #[sqlx::test]
+    async fn transition_de_pedido_inexistente_retorna_none(pool: PgPool) {
+        let repo = OrderRepository::new(pool);
+
+        let result = repo
+            .transition(Uuid::new_v4(), |o| o.mark_stock_reserved())
+            .await
+            .unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[sqlx::test]
+    async fn transition_invalida_retorna_erro_sem_persistir(pool: PgPool) {
+        let repo = OrderRepository::new(pool);
+        let order = order();
+        repo.insert(&order).await.unwrap();
+        repo.transition(order.id, |o| o.cancel()).await.unwrap();
+
+        let err = repo
+            .transition(order.id, |o| o.mark_stock_reserved())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            OrderError::Domain(DomainError::InvalidTransition { .. })
+        ));
+
+        let found = repo.find_by_id(order.id).await.unwrap().unwrap();
+        assert_eq!(found.status, OrderStatus::Cancelled);
     }
 }

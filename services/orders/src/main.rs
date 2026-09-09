@@ -1,7 +1,8 @@
 use orders::app::{router, AppState};
 use orders::catalog_client::CatalogClient;
+use orders::consumer;
 use shared::config::{env_vars, required};
-use shared::{AppConfig, DatabaseConfig};
+use shared::{AmqpConfig, AppConfig, DatabaseConfig, EventBus};
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -12,8 +13,11 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = shared::db::connect(&DatabaseConfig::from_env()?).await?;
     sqlx::migrate!().run(&pool).await?;
+    let bus = EventBus::connect(&AmqpConfig::from_env()?).await?;
 
-    let state = AppState::new(config, pool, CatalogClient::new(catalog_url));
+    let state = AppState::new(config, pool, CatalogClient::new(catalog_url), bus.clone());
+    let _consumer = consumer::spawn(bus, state.orders.clone(), "orders").await?;
+
     let listener = TcpListener::bind(&addr).await?;
     println!("{} ouvindo em http://{addr}", state.config.service_name);
 

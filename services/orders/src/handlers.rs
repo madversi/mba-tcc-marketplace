@@ -1,6 +1,7 @@
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
+use domain::events::OrderCreated;
 use domain::{Money, Order, OrderItem};
 use serde::Deserialize;
 use shared::ApiError;
@@ -58,6 +59,20 @@ pub async fn create(
 
     let order = Order::new(body.buyer_id, items)?;
     state.orders.insert(&order).await?;
+
+    let event = OrderCreated {
+        order_id: order.id,
+        buyer_id: order.buyer_id,
+        items: order.items.clone(),
+        total: order.total,
+        occurred_at: domain::time::now(),
+    };
+    if let Err(err) = state.bus.publish(&event).await {
+        eprintln!(
+            "falha ao publicar order.created do pedido {}: {err}",
+            order.id
+        );
+    }
 
     Ok((StatusCode::CREATED, Json(order)))
 }

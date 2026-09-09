@@ -86,12 +86,15 @@ services:
       <<: *service-env
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/orders
       CATALOG_URL: http://catalog:8080
+      AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
     ports:
       - "8082:8080"
     depends_on:
       postgres:
         condition: service_healthy
       catalog:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
 
   inventory:
@@ -106,8 +109,14 @@ services:
     environment:
       <<: *service-env
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/inventory
+      AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
     ports:
       - "8083:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
   payments:
     <<: *service
@@ -121,8 +130,14 @@ services:
     environment:
       <<: *service-env
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/payments
+      AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
     ports:
       - "8084:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
 
 volumes:
   postgres-data:

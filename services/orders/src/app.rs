@@ -5,7 +5,7 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use shared::api::Health;
-use shared::AppConfig;
+use shared::{AppConfig, EventBus};
 use sqlx::PgPool;
 
 use crate::catalog_client::CatalogClient;
@@ -18,15 +18,17 @@ pub struct AppState {
     pub pool: PgPool,
     pub orders: OrderRepository,
     pub catalog: CatalogClient,
+    pub bus: EventBus,
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, pool: PgPool, catalog: CatalogClient) -> Self {
+    pub fn new(config: AppConfig, pool: PgPool, catalog: CatalogClient, bus: EventBus) -> Self {
         Self {
             config: Arc::new(config),
             orders: OrderRepository::new(pool.clone()),
             pool,
             catalog,
+            bus,
         }
     }
 }

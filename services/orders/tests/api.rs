@@ -6,11 +6,12 @@ use axum::extract::{Path, State};
 use axum::http::{header, Method, Request, StatusCode};
 use axum::routing::get;
 use axum::{Json, Router};
+use domain::events::{Event, OrderCreated};
 use http_body_util::BodyExt;
 use orders::app::{router, AppState};
 use orders::catalog_client::CatalogClient;
 use serde_json::{json, Value};
-use shared::AppConfig;
+use shared::{AmqpConfig, AppConfig, EventBus};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -50,9 +51,21 @@ async fn fake_catalog(products: Vec<FakeProduct>) -> String {
     format!("http://{addr}")
 }
 
-fn app(pool: PgPool, catalog_url: &str) -> Router {
+async fn event_bus() -> EventBus {
+    let config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
+    EventBus::connect(&config)
+        .await
+        .expect("broker inacessível")
+}
+
+async fn app(pool: PgPool, catalog_url: &str) -> Router {
     let config = AppConfig::from_source(&HashMap::new(), "orders").unwrap();
-    router(AppState::new(config, pool, CatalogClient::new(catalog_url)))
+    router(AppState::new(
+        config,
+        pool,
+        CatalogClient::new(catalog_url),
+        event_bus().await,
+    ))
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -94,7 +107,7 @@ async fn create_order(app: &Router, items: Value) -> (StatusCode, Value) {
 async fn cria_pedido_com_precos_do_catalogo(pool: PgPool) {
     let (teclado, mouse) = (Uuid::new_v4(), Uuid::new_v4());
     let catalog = fake_catalog(vec![(teclado, 1_000, true), (mouse, 500, true)]).await;
-    let app = app(pool, &catalog);
+    let app = app(pool, &catalog).await;
 
     let (status, order) = create_order(
         &app,
@@ -128,7 +141,7 @@ async fn cria_pedido_com_precos_do_catalogo(pool: PgPool) {
 async fn produto_inexistente_ou_inativo_da_422(pool: PgPool) {
     let inativo = Uuid::new_v4();
     let catalog = fake_catalog(vec![(inativo, 100, false)]).await;
-    let app = app(pool, &catalog);
+    let app = app(pool, &catalog).await;
 
     let (status, body) = create_order(
         &app,
@@ -146,7 +159,7 @@ async fn produto_inexistente_ou_inativo_da_422(pool: PgPool) {
 
 #[sqlx::test]
 async fn catalogo_fora_do_ar_da_503(pool: PgPool) {
-    let app = app(pool, "http://127.0.0.1:1");
+    let app = app(pool, "http://127.0.0.1:1").await;
 
     let (status, body) = create_order(
         &app,
@@ -165,7 +178,7 @@ async fn catalogo_fora_do_ar_da_503(pool: PgPool) {
 async fn pedido_invalido_da_422(pool: PgPool) {
     let product = Uuid::new_v4();
     let catalog = fake_catalog(vec![(product, 100, true)]).await;
-    let app = app(pool, &catalog);
+    let app = app(pool, &catalog).await;
 
     let (status, _) = create_order(&app, json!([])).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -186,8 +199,64 @@ async fn pedido_invalido_da_422(pool: PgPool) {
 }
 
 #[sqlx::test]
+async fn publica_order_created_ao_criar_pedido(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let catalog = fake_catalog(vec![(product, 1_000, true)]).await;
+    let app = app(pool, &catalog).await;
+
+    let bus = event_bus().await;
+    let service = format!("test-orders-{}", Uuid::new_v4());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<OrderCreated>(8);
+    let consumer = bus
+        .spawn_consumer::<OrderCreated, _, _>(&service, move |event| {
+            let tx = tx.clone();
+            async move {
+                tx.send(event).await.unwrap();
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    let (status, order) =
+        create_order(&app, json!([{ "product_id": product, "quantity": 3 }])).await;
+    assert_eq!(status, StatusCode::CREATED, "{order}");
+    let order_id = Uuid::parse_str(order["id"].as_str().unwrap()).unwrap();
+
+    let event = loop {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("order.created não chegou em 5s")
+            .unwrap();
+        if event.order_id == order_id {
+            break event;
+        }
+    };
+
+    assert_eq!(event.total.cents(), 3_000);
+    assert_eq!(event.items.len(), 1);
+    assert_eq!(event.items[0].product_id, product);
+    assert_eq!(event.items[0].quantity, 3);
+
+    consumer.abort();
+    let amqp = AmqpConfig::from_env().unwrap();
+    let conn = lapin::Connection::connect(&amqp.url, lapin::ConnectionProperties::default())
+        .await
+        .unwrap();
+    conn.create_channel()
+        .await
+        .unwrap()
+        .queue_delete(
+            &format!("{service}.{}", OrderCreated::ROUTING_KEY),
+            lapin::options::QueueDeleteOptions::default(),
+        )
+        .await
+        .unwrap();
+}
+
+#[sqlx::test]
 async fn pedido_inexistente_da_404(pool: PgPool) {
-    let app = app(pool, "http://127.0.0.1:1");
+    let app = app(pool, "http://127.0.0.1:1").await;
     let id = Uuid::new_v4();
 
     let (status, _) = send(&app, Method::GET, &format!("/orders/{id}"), None).await;
