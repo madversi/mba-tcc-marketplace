@@ -88,7 +88,7 @@ fn reject_reason(err: StockError) -> String {
         StockError::NotFound => "produto sem estoque cadastrado".to_owned(),
         StockError::Domain(e) => e.to_string(),
         StockError::Db(e) => {
-            eprintln!("erro de banco ao reservar estoque: {e}");
+            tracing::error!(err = %e, "erro de banco ao reservar estoque");
             "erro interno ao reservar estoque".to_owned()
         }
     }

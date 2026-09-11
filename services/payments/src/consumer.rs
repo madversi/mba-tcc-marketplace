@@ -81,9 +81,10 @@ async fn publish_result(
             .await?;
         }
         PaymentStatus::Pending => {
-            eprintln!(
-                "pagamento {} do pedido {order_id} ficou PENDING (gateway indisponível)",
-                payment.id
+            tracing::warn!(
+                payment_id = %payment.id,
+                %order_id,
+                "pagamento ficou PENDING (gateway indisponível)"
             );
         }
     }

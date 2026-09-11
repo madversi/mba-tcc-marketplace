@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 fn app(pool: PgPool) -> Router {
     let config = AppConfig::from_source(&HashMap::new(), "inventory").unwrap();
-    router(AppState::new(config, pool))
+    router(AppState::new(config, pool), shared::metrics::init())
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {

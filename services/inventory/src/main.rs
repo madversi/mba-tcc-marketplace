@@ -6,6 +6,8 @@ use tokio::net::TcpListener;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let config = AppConfig::from_env(env!("CARGO_PKG_NAME"))?;
+    shared::telemetry::init_from_app_config(&config);
+    let metrics = shared::metrics::init();
     let addr = config.bind_addr();
 
     let pool = shared::db::connect(&DatabaseConfig::from_env()?).await?;
@@ -16,8 +18,8 @@ async fn main() -> anyhow::Result<()> {
     let _consumer = consumer::spawn(bus, state.stock.clone(), "inventory").await?;
 
     let listener = TcpListener::bind(&addr).await?;
-    println!("{} ouvindo em http://{addr}", state.config.service_name);
+    tracing::info!(%addr, service = %state.config.service_name, "ouvindo");
 
-    axum::serve(listener, router(state)).await?;
+    axum::serve(listener, router(state, metrics)).await?;
     Ok(())
 }

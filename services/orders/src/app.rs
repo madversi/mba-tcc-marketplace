@@ -2,11 +2,15 @@ use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use metrics_exporter_prometheus::PrometheusHandle;
 use shared::api::Health;
+use shared::metrics::track_http;
 use shared::{AppConfig, EventBus};
 use sqlx::PgPool;
+use tower_http::trace::TraceLayer;
 
 use crate::catalog_client::CatalogClient;
 use crate::handlers;
@@ -33,11 +37,14 @@ impl AppState {
     }
 }
 
-pub fn router(state: AppState) -> Router {
+pub fn router(state: AppState, metrics: PrometheusHandle) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/orders", post(handlers::create))
         .route("/orders/{id}", get(handlers::get))
+        .route_layer(middleware::from_fn(track_http))
+        .route("/metrics", get(move || shared::metrics::render(metrics)))
+        .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 

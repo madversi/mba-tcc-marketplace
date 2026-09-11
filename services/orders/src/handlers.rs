@@ -68,10 +68,7 @@ pub async fn create(
         occurred_at: domain::time::now(),
     };
     if let Err(err) = state.bus.publish(&event).await {
-        eprintln!(
-            "falha ao publicar order.created do pedido {}: {err}",
-            order.id
-        );
+        tracing::error!(order_id = %order.id, %err, "falha ao publicar order.created");
     }
 
     Ok((StatusCode::CREATED, Json(order)))

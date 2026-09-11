@@ -14,7 +14,10 @@ use uuid::Uuid;
 
 fn app(pool: PgPool) -> Router {
     let config = AppConfig::from_source(&HashMap::new(), "payments").unwrap();
-    router(AppState::new(config, pool, SimulatedGateway))
+    router(
+        AppState::new(config, pool, SimulatedGateway),
+        shared::metrics::init(),
+    )
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {

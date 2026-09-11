@@ -60,12 +60,15 @@ async fn event_bus() -> EventBus {
 
 async fn app(pool: PgPool, catalog_url: &str) -> Router {
     let config = AppConfig::from_source(&HashMap::new(), "orders").unwrap();
-    router(AppState::new(
-        config,
-        pool,
-        CatalogClient::new(catalog_url),
-        event_bus().await,
-    ))
+    router(
+        AppState::new(
+            config,
+            pool,
+            CatalogClient::new(catalog_url),
+            event_bus().await,
+        ),
+        shared::metrics::init(),
+    )
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {

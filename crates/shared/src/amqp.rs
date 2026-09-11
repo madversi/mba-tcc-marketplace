@@ -10,6 +10,7 @@ use lapin::options::{
 use lapin::types::FieldTable;
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind};
 use tokio::task::JoinHandle;
+use tracing::Instrument;
 
 use crate::config::AmqpConfig;
 
@@ -118,31 +119,46 @@ impl EventBus {
                 let delivery = match delivery {
                     Ok(delivery) => delivery,
                     Err(err) => {
-                        eprintln!("consumo interrompido em {queue}: {err}");
+                        tracing::error!(%queue, %err, "consumo interrompido");
                         break;
                     }
                 };
 
-                let outcome = match serde_json::from_slice::<E>(&delivery.data) {
-                    Ok(event) => handler(event).await,
-                    Err(err) => Err(HandlerError::from(err)),
-                };
+                let span = tracing::info_span!("message_processing", %queue);
+                async {
+                    let start = std::time::Instant::now();
+                    let outcome = match serde_json::from_slice::<E>(&delivery.data) {
+                        Ok(event) => handler(event).await,
+                        Err(err) => Err(HandlerError::from(err)),
+                    };
+                    let elapsed = start.elapsed().as_secs_f64();
 
-                let result = match outcome {
-                    Ok(()) => delivery.ack(BasicAckOptions::default()).await,
-                    Err(err) => {
-                        eprintln!("handler falhou em {queue}: {err}");
-                        delivery
-                            .nack(BasicNackOptions {
-                                requeue: false,
-                                ..Default::default()
-                            })
-                            .await
+                    let status = if outcome.is_ok() { "ok" } else { "error" };
+                    metrics::histogram!(
+                        "message_processing_duration_seconds",
+                        "queue" => queue.clone(),
+                        "status" => status,
+                    )
+                    .record(elapsed);
+
+                    let result = match outcome {
+                        Ok(()) => delivery.ack(BasicAckOptions::default()).await,
+                        Err(err) => {
+                            tracing::error!(%queue, %err, "handler falhou");
+                            delivery
+                                .nack(BasicNackOptions {
+                                    requeue: false,
+                                    ..Default::default()
+                                })
+                                .await
+                        }
+                    };
+                    if let Err(err) = result {
+                        tracing::error!(%queue, %err, "falha ao confirmar mensagem");
                     }
-                };
-                if let Err(err) = result {
-                    eprintln!("falha ao confirmar mensagem em {queue}: {err}");
                 }
+                .instrument(span)
+                .await;
             }
         });
 

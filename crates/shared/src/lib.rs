@@ -2,6 +2,8 @@ pub mod amqp;
 pub mod api;
 pub mod config;
 pub mod db;
+pub mod metrics;
+pub mod telemetry;
 
 pub use amqp::EventBus;
 

@@ -61,7 +61,7 @@ async fn apply(
     match orders.transition(order_id, transition).await {
         Ok(_) => Ok(()),
         Err(OrderError::Domain(DomainError::InvalidTransition { from, to })) => {
-            eprintln!("transição {from} -> {to} ignorada para o pedido {order_id}");
+            tracing::warn!(%order_id, %from, %to, "transição ignorada");
             Ok(())
         }
         Err(err) => Err(err.into()),
