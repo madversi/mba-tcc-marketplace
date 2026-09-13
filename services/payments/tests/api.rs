@@ -5,7 +5,7 @@ use axum::http::{header, Method, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use payments::app::{router, AppState};
-use payments::gateway::SimulatedGateway;
+use payments::gateway::{GatewayClient, GatewayResilience, SimulatedGateway};
 use serde_json::{json, Value};
 use shared::AppConfig;
 use sqlx::PgPool;
@@ -15,7 +15,14 @@ use uuid::Uuid;
 fn app(pool: PgPool) -> Router {
     let config = AppConfig::from_source(&HashMap::new(), "payments").unwrap();
     router(
-        AppState::new(config, pool, SimulatedGateway),
+        AppState::new(
+            config,
+            pool,
+            GatewayClient::new(
+                SimulatedGateway::default(),
+                GatewayResilience::from_source(&HashMap::new()).unwrap(),
+            ),
+        ),
         shared::metrics::init(),
     )
 }
@@ -115,4 +122,71 @@ async fn pagamento_inexistente_da_404(pool: PgPool) {
 
     let (status, _) = send(&app, Method::GET, &format!("/payments/order/{id}"), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[sqlx::test]
+async fn admin_le_e_atualiza_configuracao_do_gateway(pool: PgPool) {
+    let app = app(pool);
+
+    let (status, config) = send(&app, Method::GET, "/admin/gateway", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(config["failure_rate"], 0.0);
+    assert_eq!(config["latency_ms"], 0);
+    assert_eq!(config["unavailable"], false);
+
+    let (status, updated) = send(
+        &app,
+        Method::PATCH,
+        "/admin/gateway",
+        Some(json!({ "unavailable": true, "latency_ms": 50 })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["unavailable"], true);
+    assert_eq!(updated["latency_ms"], 50);
+
+    let (status, _) = pay(&app, Uuid::new_v4(), 1_000).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+}
+
+#[sqlx::test]
+async fn admin_rejeita_failure_rate_fora_do_intervalo(pool: PgPool) {
+    let app = app(pool);
+
+    let (status, body) = send(
+        &app,
+        Method::PATCH,
+        "/admin/gateway",
+        Some(json!({ "failure_rate": 1.5 })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(body["error"].as_str().unwrap().contains("failure_rate"));
+}
+
+#[sqlx::test]
+async fn gateway_indisponivel_mantem_pagamento_pending(pool: PgPool) {
+    let app = app(pool);
+    send(
+        &app,
+        Method::PATCH,
+        "/admin/gateway",
+        Some(json!({ "unavailable": true })),
+    )
+    .await;
+
+    let order_id = Uuid::new_v4();
+    let (status, _) = pay(&app, order_id, 1_000).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    let (status, payment) = send(
+        &app,
+        Method::GET,
+        &format!("/payments/order/{order_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(payment["status"], "PENDING");
 }

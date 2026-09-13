@@ -1,6 +1,6 @@
 use payments::app::{router, AppState};
-use payments::consumer;
-use payments::gateway::SimulatedGateway;
+use payments::consumer::{self, Reprocessing};
+use payments::gateway::{GatewayClient, GatewayResilience, SimulatedGateway};
 use shared::{AmqpConfig, AppConfig, DatabaseConfig, EventBus};
 use tokio::net::TcpListener;
 
@@ -15,11 +15,13 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!().run(&pool).await?;
     let bus = EventBus::connect(&AmqpConfig::from_env()?).await?;
 
-    let state = AppState::new(config, pool, SimulatedGateway);
-    let _consumer = consumer::spawn(
+    let gateway = GatewayClient::new(SimulatedGateway::from_env(), GatewayResilience::from_env()?);
+    let state = AppState::new(config, pool, gateway);
+    let _consumers = consumer::spawn(
         bus,
         state.payments.clone(),
         state.gateway.clone(),
+        Reprocessing::from_env()?,
         "payments",
     )
     .await?;

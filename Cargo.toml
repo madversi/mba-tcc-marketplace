@@ -36,6 +36,8 @@ lapin = "2"
 futures-util = { version = "0.3", default-features = false }
 http-body-util = "0.1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "postgres", "macros", "migrate", "uuid", "chrono"] }
+rand = "0.10"
+moka = { version = "0.12", features = ["sync"] }
 
 domain = { path = "crates/domain" }
 shared = { path = "crates/shared" }

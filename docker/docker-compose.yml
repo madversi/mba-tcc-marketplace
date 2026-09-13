@@ -131,6 +131,9 @@ services:
       <<: *service-env
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/payments
       AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
+      FAILURE_RATE: ${FAILURE_RATE:-0}
+      LATENCY_MS: ${LATENCY_MS:-0}
+      UNAVAILABLE: ${UNAVAILABLE:-false}
     ports:
       - "8084:8080"
     depends_on:

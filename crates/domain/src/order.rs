@@ -38,6 +38,7 @@ impl OrderStatus {
             (Pending, StockReserved)
                 | (Pending, Cancelled)
                 | (Pending, Confirmed)
+                | (Pending, PaymentPending)
                 | (StockReserved, Confirmed)
                 | (StockReserved, PaymentPending)
                 | (StockReserved, Cancelled)
@@ -288,6 +289,16 @@ mod tests {
     fn confirma_diretamente_de_pending() {
         let mut order = order();
 
+        order.confirm().unwrap();
+
+        assert_eq!(order.status, OrderStatus::Confirmed);
+    }
+
+    #[test]
+    fn marca_pagamento_pendente_diretamente_de_pending() {
+        let mut order = order();
+
+        order.mark_payment_pending().unwrap();
         order.confirm().unwrap();
 
         assert_eq!(order.status, OrderStatus::Confirmed);

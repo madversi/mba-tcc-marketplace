@@ -67,6 +67,17 @@ impl Event for PaymentFailed {
     const ROUTING_KEY: &'static str = "payment.failed";
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaymentPending {
+    pub order_id: Uuid,
+    pub payment_id: Uuid,
+    pub occurred_at: DateTime<Utc>,
+}
+
+impl Event for PaymentPending {
+    const ROUTING_KEY: &'static str = "payment.pending";
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -110,6 +121,11 @@ mod tests {
             reason: "cartão recusado".to_owned(),
             occurred_at: now,
         });
+        round_trip(&PaymentPending {
+            order_id,
+            payment_id: Uuid::new_v4(),
+            occurred_at: now,
+        });
     }
 
     #[test]
@@ -119,6 +135,7 @@ mod tests {
         assert_eq!(StockRejected::ROUTING_KEY, "stock.rejected");
         assert_eq!(PaymentApproved::ROUTING_KEY, "payment.approved");
         assert_eq!(PaymentFailed::ROUTING_KEY, "payment.failed");
+        assert_eq!(PaymentPending::ROUTING_KEY, "payment.pending");
     }
 
     #[test]

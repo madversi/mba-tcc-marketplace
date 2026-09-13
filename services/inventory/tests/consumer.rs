@@ -22,12 +22,17 @@ async fn delete_queue(name: &str) {
     let conn = lapin::Connection::connect(&config.url, lapin::ConnectionProperties::default())
         .await
         .unwrap();
-    conn.create_channel()
-        .await
-        .unwrap()
-        .queue_delete(name, lapin::options::QueueDeleteOptions::default())
-        .await
-        .unwrap();
+    let channel = conn.create_channel().await.unwrap();
+    for queue in [
+        name.to_owned(),
+        format!("{name}.retry"),
+        format!("{name}.dead"),
+    ] {
+        channel
+            .queue_delete(&queue, lapin::options::QueueDeleteOptions::default())
+            .await
+            .unwrap();
+    }
 }
 
 async fn delete_consumer_queues(service: &str) {

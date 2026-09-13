@@ -10,7 +10,10 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 chrono = { workspace = true }
 domain = { workspace = true }
+metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+rand = { workspace = true }
+resilience = { workspace = true }
 serde = { workspace = true }
 shared = { workspace = true }
 sqlx = { workspace = true }

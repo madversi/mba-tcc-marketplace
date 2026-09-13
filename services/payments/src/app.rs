@@ -12,20 +12,20 @@ use shared::AppConfig;
 use sqlx::PgPool;
 use tower_http::trace::TraceLayer;
 
-use crate::gateway::SimulatedGateway;
-use crate::handlers;
+use crate::gateway::GatewayClient;
 use crate::repository::PaymentRepository;
+use crate::{admin, handlers};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AppConfig>,
     pub pool: PgPool,
     pub payments: PaymentRepository,
-    pub gateway: SimulatedGateway,
+    pub gateway: GatewayClient,
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, pool: PgPool, gateway: SimulatedGateway) -> Self {
+    pub fn new(config: AppConfig, pool: PgPool, gateway: GatewayClient) -> Self {
         Self {
             config: Arc::new(config),
             payments: PaymentRepository::new(pool.clone()),
@@ -41,6 +41,10 @@ pub fn router(state: AppState, metrics: PrometheusHandle) -> Router {
         .route("/payments", axum::routing::post(handlers::create))
         .route("/payments/{id}", get(handlers::get))
         .route("/payments/order/{order_id}", get(handlers::get_by_order))
+        .route(
+            "/admin/gateway",
+            get(admin::get_gateway_config).patch(admin::update_gateway_config),
+        )
         .route_layer(middleware::from_fn(track_http))
         .route("/metrics", get(move || shared::metrics::render(metrics)))
         .layer(TraceLayer::new_for_http())

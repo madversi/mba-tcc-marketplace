@@ -137,6 +137,8 @@ pub struct AmqpConfig {
     pub url: String,
     pub exchange: String,
     pub prefetch: u16,
+    pub retry_ttl_ms: u64,
+    pub max_attempts: u32,
 }
 
 impl AmqpConfig {
@@ -151,6 +153,8 @@ impl AmqpConfig {
                 .unwrap_or("marketplace")
                 .to_owned(),
             prefetch: parse_or(vars, "AMQP_PREFETCH", 16)?,
+            retry_ttl_ms: parse_or(vars, "AMQP_RETRY_TTL_MS", 5_000)?,
+            max_attempts: parse_or(vars, "AMQP_MAX_ATTEMPTS", 3)?,
         })
     }
 }
@@ -257,6 +261,8 @@ mod tests {
 
         assert_eq!(cfg.exchange, "marketplace");
         assert_eq!(cfg.prefetch, 16);
+        assert_eq!(cfg.retry_ttl_ms, 5_000);
+        assert_eq!(cfg.max_attempts, 3);
     }
 
     #[test]

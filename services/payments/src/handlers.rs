@@ -7,7 +7,7 @@ use shared::ApiError;
 use uuid::Uuid;
 
 use crate::app::AppState;
-use crate::gateway::{ChargeOutcome, GatewayError};
+use crate::gateway::ChargeOutcome;
 
 #[derive(Deserialize)]
 pub struct CreatePayment {
@@ -32,11 +32,7 @@ pub async fn create(
     match state.gateway.charge(&payment).await {
         Ok(ChargeOutcome::Approved) => payment.approve()?,
         Ok(ChargeOutcome::Declined { reason }) => payment.fail(reason)?,
-        Err(GatewayError::Unavailable) => {
-            return Err(ApiError::Unavailable(
-                "gateway de pagamento indisponível; pagamento pendente".to_owned(),
-            ))
-        }
+        Err(err) => return Err(ApiError::Unavailable(format!("{err}; pagamento pendente"))),
     }
     state.payments.update_status(&payment).await?;
 

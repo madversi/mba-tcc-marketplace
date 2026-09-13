@@ -1,4 +1,6 @@
-use domain::events::{PaymentApproved, PaymentFailed, StockRejected, StockReserved};
+use domain::events::{
+    PaymentApproved, PaymentFailed, PaymentPending, StockRejected, StockReserved,
+};
 use domain::{DomainError, Order};
 use shared::amqp::{AmqpError, HandlerError};
 use shared::EventBus;
@@ -12,7 +14,7 @@ pub async fn spawn(
     orders: OrderRepository,
     service: &str,
 ) -> Result<Vec<JoinHandle<()>>, AmqpError> {
-    let mut handles = Vec::with_capacity(4);
+    let mut handles = Vec::with_capacity(5);
 
     let orders_ref = orders.clone();
     handles.push(
@@ -28,6 +30,15 @@ pub async fn spawn(
         bus.spawn_consumer::<StockRejected, _, _>(service, move |event| {
             let orders = orders_ref.clone();
             async move { apply(&orders, event.order_id, |o| o.cancel()).await }
+        })
+        .await?,
+    );
+
+    let orders_ref = orders.clone();
+    handles.push(
+        bus.spawn_consumer::<PaymentPending, _, _>(service, move |event| {
+            let orders = orders_ref.clone();
+            async move { apply(&orders, event.order_id, |o| o.mark_payment_pending()).await }
         })
         .await?,
     );
