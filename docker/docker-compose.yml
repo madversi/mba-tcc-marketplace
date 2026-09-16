@@ -185,6 +185,19 @@ services:
       - /var/lib/docker/:/var/lib/docker:ro
     restart: unless-stopped
 
+  k6:
+    image: grafana/k6:1.4.0
+    container_name: marketplace-k6
+    profiles: ["load"]
+    volumes:
+      - ../load-tests:/scripts:ro
+      - ../load-tests/results:/results
+    environment:
+      CATALOG_URL: http://catalog:8080
+      ORDERS_URL: http://orders:8080
+      INVENTORY_URL: http://inventory:8080
+      PAYMENTS_URL: http://payments:8080
+
 volumes:
   postgres-data:
   rabbitmq-data:
