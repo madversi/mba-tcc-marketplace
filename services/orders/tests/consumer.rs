@@ -6,16 +6,10 @@ use domain::events::{
 use domain::{Money, Order, OrderItem, OrderStatus};
 use orders::consumer;
 use orders::repository::OrderRepository;
-use shared::{AmqpConfig, EventBus};
+use shared::testing::IsolatedBroker;
+use shared::AmqpConfig;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-async fn event_bus() -> EventBus {
-    let config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    EventBus::connect(&config)
-        .await
-        .expect("broker inacessível")
-}
 
 async fn delete_queue(name: &str) {
     let config = AmqpConfig::from_env().unwrap();
@@ -66,7 +60,8 @@ async fn stock_reserved_atualiza_status(pool: PgPool) {
     let order = new_order();
     repo.insert(&order).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-orders-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), repo.clone(), &service)
         .await
@@ -94,7 +89,8 @@ async fn stock_rejected_cancela_pedido(pool: PgPool) {
     let order = new_order();
     repo.insert(&order).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-orders-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), repo.clone(), &service)
         .await
@@ -122,7 +118,8 @@ async fn caminho_feliz_completo_ate_confirmed(pool: PgPool) {
     let order = new_order();
     repo.insert(&order).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-orders-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), repo.clone(), &service)
         .await
@@ -158,7 +155,8 @@ async fn stock_reserved_seguido_de_payment_failed_cancela(pool: PgPool) {
     let order = new_order();
     repo.insert(&order).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-orders-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), repo.clone(), &service)
         .await
@@ -194,7 +192,8 @@ async fn payment_pending_marca_o_pedido_e_depois_confirma(pool: PgPool) {
     let order = new_order();
     repo.insert(&order).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-orders-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), repo.clone(), &service)
         .await
@@ -231,7 +230,8 @@ async fn payment_approved_antes_de_stock_reserved_ainda_confirma(pool: PgPool) {
     let order = new_order();
     repo.insert(&order).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-orders-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), repo.clone(), &service)
         .await

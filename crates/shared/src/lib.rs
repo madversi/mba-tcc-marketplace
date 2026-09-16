@@ -4,6 +4,7 @@ pub mod config;
 pub mod db;
 pub mod metrics;
 pub mod telemetry;
+pub mod testing;
 
 pub use amqp::EventBus;
 

@@ -6,16 +6,10 @@ use domain::events::{
 use domain::{Money, OrderItem};
 use inventory::consumer;
 use inventory::repository::StockRepository;
-use shared::{AmqpConfig, EventBus};
+use shared::testing::IsolatedBroker;
+use shared::AmqpConfig;
 use sqlx::PgPool;
 use uuid::Uuid;
-
-async fn event_bus() -> EventBus {
-    let config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    EventBus::connect(&config)
-        .await
-        .expect("broker inacessível")
-}
 
 async fn delete_queue(name: &str) {
     let config = AmqpConfig::from_env().unwrap();
@@ -51,35 +45,11 @@ fn order_created(items: Vec<OrderItem>, total_cents: i64) -> OrderCreated {
     }
 }
 
-async fn recv_for<T>(rx: &mut tokio::sync::mpsc::Receiver<T>, order_id: Uuid) -> T
-where
-    T: HasOrderId,
-{
-    loop {
-        let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .expect("evento não chegou em 5s")
-            .unwrap();
-        if event.order_id() == order_id {
-            return event;
-        }
-    }
-}
-
-trait HasOrderId {
-    fn order_id(&self) -> Uuid;
-}
-
-impl HasOrderId for StockReserved {
-    fn order_id(&self) -> Uuid {
-        self.order_id
-    }
-}
-
-impl HasOrderId for StockRejected {
-    fn order_id(&self) -> Uuid {
-        self.order_id
-    }
+async fn recv<T>(rx: &mut tokio::sync::mpsc::Receiver<T>) -> T {
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("evento não chegou em 5s")
+        .unwrap()
 }
 
 #[sqlx::test]
@@ -88,7 +58,8 @@ async fn reserva_estoque_e_publica_stock_reserved(pool: PgPool) {
     let product_id = Uuid::new_v4();
     stock.set_available(product_id, 10).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-inventory-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
         .await
@@ -114,7 +85,8 @@ async fn reserva_estoque_e_publica_stock_reserved(pool: PgPool) {
     let order_id = event.order_id;
     bus.publish(&event).await.unwrap();
 
-    let received = recv_for(&mut rx, order_id).await;
+    let received = recv(&mut rx).await;
+    assert_eq!(received.order_id, order_id);
     assert_eq!(received.amount, Money::from_cents(3_000));
 
     let item = stock.find(product_id).await.unwrap().unwrap();
@@ -138,7 +110,8 @@ async fn estoque_insuficiente_publica_stock_rejected(pool: PgPool) {
     let product_id = Uuid::new_v4();
     stock.set_available(product_id, 1).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-inventory-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
         .await
@@ -164,7 +137,8 @@ async fn estoque_insuficiente_publica_stock_rejected(pool: PgPool) {
     let order_id = event.order_id;
     bus.publish(&event).await.unwrap();
 
-    let received = recv_for(&mut rx, order_id).await;
+    let received = recv(&mut rx).await;
+    assert_eq!(received.order_id, order_id);
     assert!(
         received.reason.contains("insuficiente"),
         "{}",
@@ -190,7 +164,8 @@ async fn pedido_multi_item_e_atomico_via_evento(pool: PgPool) {
     stock.set_available(ok_product, 10).await.unwrap();
     stock.set_available(short_product, 1).await.unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-inventory-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
         .await
@@ -219,7 +194,8 @@ async fn pedido_multi_item_e_atomico_via_evento(pool: PgPool) {
     let order_id = event.order_id;
     bus.publish(&event).await.unwrap();
 
-    recv_for(&mut rx, order_id).await;
+    let received = recv(&mut rx).await;
+    assert_eq!(received.order_id, order_id);
 
     let ok_item = stock.find(ok_product).await.unwrap().unwrap();
     assert_eq!((ok_item.available, ok_item.reserved), (10, 0));
@@ -241,7 +217,8 @@ async fn produto_sem_estoque_cadastrado_publica_stock_rejected(pool: PgPool) {
     let stock = StockRepository::new(pool);
     let product_id = Uuid::new_v4();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-inventory-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
         .await
@@ -267,7 +244,8 @@ async fn produto_sem_estoque_cadastrado_publica_stock_rejected(pool: PgPool) {
     let order_id = event.order_id;
     bus.publish(&event).await.unwrap();
 
-    let received = recv_for(&mut rx, order_id).await;
+    let received = recv(&mut rx).await;
+    assert_eq!(received.order_id, order_id);
     assert_eq!(received.reason, "produto sem estoque cadastrado");
 
     for handle in handles {
@@ -305,7 +283,8 @@ async fn payment_failed_libera_a_reserva(pool: PgPool) {
         .await
         .unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-inventory-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
         .await
@@ -342,7 +321,8 @@ async fn payment_approved_consome_a_reserva(pool: PgPool) {
         .await
         .unwrap();
 
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-inventory-{}", Uuid::new_v4());
     let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
         .await

@@ -5,40 +5,21 @@ use domain::{Money, Payment, PaymentStatus};
 use payments::consumer::{self, Reprocessing};
 use payments::gateway::{GatewayClient, GatewayResilience, SimulatedGateway};
 use payments::repository::PaymentRepository;
+use shared::testing::IsolatedBroker;
 use shared::{AmqpConfig, EventBus};
 use sqlx::PgPool;
 use tokio::sync::mpsc::Receiver;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-async fn event_bus() -> EventBus {
-    let config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    EventBus::connect(&config)
-        .await
-        .expect("broker inacessível")
-}
-
-async fn isolated_bus() -> (EventBus, AmqpConfig) {
-    let mut config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    config.exchange = format!("test-{}", Uuid::new_v4());
-    let bus = EventBus::connect(&config)
-        .await
-        .expect("broker inacessível");
-    (bus, config)
-}
-
-async fn channel() -> lapin::Channel {
+async fn delete_queue(name: &str) {
     let config = AmqpConfig::from_env().unwrap();
-    lapin::Connection::connect(&config.url, lapin::ConnectionProperties::default())
+    let channel = lapin::Connection::connect(&config.url, lapin::ConnectionProperties::default())
         .await
         .unwrap()
         .create_channel()
         .await
-        .unwrap()
-}
-
-async fn delete_queue(name: &str) {
-    let channel = channel().await;
+        .unwrap();
     for queue in [
         name.to_owned(),
         format!("{name}.retry"),
@@ -46,19 +27,6 @@ async fn delete_queue(name: &str) {
     ] {
         channel
             .queue_delete(&queue, lapin::options::QueueDeleteOptions::default())
-            .await
-            .unwrap();
-    }
-}
-
-async fn delete_exchanges(config: &AmqpConfig) {
-    let channel = channel().await;
-    for suffix in ["", ".retry", ".requeue", ".dead"] {
-        channel
-            .exchange_delete(
-                &format!("{}{suffix}", config.exchange),
-                lapin::options::ExchangeDeleteOptions::default(),
-            )
             .await
             .unwrap();
     }
@@ -125,23 +93,11 @@ async fn wait_for_payment(repo: &PaymentRepository, order_id: Uuid) -> Payment {
     panic!("pagamento do pedido {order_id} não foi processado em 5s");
 }
 
-async fn recv_matching(
-    rx: &mut Receiver<PaymentApproved>,
-    order_id: Uuid,
-    payment_id: Uuid,
-) -> PaymentApproved {
-    loop {
-        let event = recv(rx).await;
-        if event.order_id == order_id && event.payment_id == payment_id {
-            return event;
-        }
-    }
-}
-
 #[sqlx::test]
 async fn cobra_e_publica_payment_approved(pool: PgPool) {
     let payments_repo = PaymentRepository::new(pool);
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-payments-{}", Uuid::new_v4());
     let handles = consumer::spawn(
         bus.clone(),
@@ -168,7 +124,8 @@ async fn cobra_e_publica_payment_approved(pool: PgPool) {
     assert_eq!(payment.amount, Money::from_cents(2_500));
     assert_eq!(payment.status, PaymentStatus::Approved);
 
-    let received = recv_matching(&mut rx, order_id, payment.id).await;
+    let received = recv(&mut rx).await;
+    assert_eq!(received.order_id, order_id);
     assert_eq!(received.payment_id, payment.id);
 
     for handle in handles {
@@ -182,7 +139,8 @@ async fn cobra_e_publica_payment_approved(pool: PgPool) {
 #[sqlx::test]
 async fn evento_reentregue_nao_cobra_duas_vezes(pool: PgPool) {
     let payments_repo = PaymentRepository::new(pool);
-    let bus = event_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let service = format!("test-payments-{}", Uuid::new_v4());
     let handles = consumer::spawn(
         bus.clone(),
@@ -205,10 +163,11 @@ async fn evento_reentregue_nao_cobra_duas_vezes(pool: PgPool) {
 
     bus.publish(&event).await.unwrap();
     let payment = wait_for_payment(&payments_repo, order_id).await;
-    recv_matching(&mut rx, order_id, payment.id).await;
+    let first = recv(&mut rx).await;
+    assert_eq!(first.payment_id, payment.id);
 
     bus.publish(&event).await.unwrap();
-    let second = recv_matching(&mut rx, order_id, payment.id).await;
+    let second = recv(&mut rx).await;
     assert_eq!(second.payment_id, payment.id);
 
     let still = payments_repo
@@ -230,7 +189,8 @@ async fn evento_reentregue_nao_cobra_duas_vezes(pool: PgPool) {
 async fn gateway_indisponivel_reprocessa_e_aprova_quando_volta(pool: PgPool) {
     let metrics = shared::metrics::init();
     let payments_repo = PaymentRepository::new(pool);
-    let (bus, config) = isolated_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let gateway = SimulatedGateway::default();
     gateway.set_unavailable(true);
 
@@ -289,14 +249,14 @@ async fn gateway_indisponivel_reprocessa_e_aprova_quando_volta(pool: PgPool) {
     delete_consumer_queues(&service).await;
     delete_queue(&pending_queue).await;
     delete_queue(&approved_queue).await;
-    delete_exchanges(&config).await;
 }
 
 #[sqlx::test]
 async fn reprocessamento_esgotado_falha_o_pagamento(pool: PgPool) {
     let metrics = shared::metrics::init();
     let payments_repo = PaymentRepository::new(pool);
-    let (bus, config) = isolated_bus().await;
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
     let gateway = SimulatedGateway::default();
     gateway.set_unavailable(true);
 
@@ -357,5 +317,4 @@ async fn reprocessamento_esgotado_falha_o_pagamento(pool: PgPool) {
     failed_watcher.abort();
     delete_consumer_queues(&service).await;
     delete_queue(&failed_queue).await;
-    delete_exchanges(&config).await;
 }

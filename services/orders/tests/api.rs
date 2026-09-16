@@ -15,7 +15,8 @@ use orders::app::{router, AppState};
 use orders::catalog_client::{CatalogClient, CatalogResilience};
 use resilience::RetryPolicy;
 use serde_json::{json, Value};
-use shared::{AmqpConfig, AppConfig, EventBus};
+use shared::testing::IsolatedBroker;
+use shared::{AmqpConfig, AppConfig};
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tower::ServiceExt;
@@ -115,28 +116,27 @@ fn no_retry() -> RetryPolicy {
     RetryPolicy::new(1, Duration::ZERO, Duration::ZERO)
 }
 
-async fn event_bus() -> EventBus {
-    let config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    EventBus::connect(&config)
-        .await
-        .expect("broker inacessível")
-}
-
-async fn app(pool: PgPool, catalog_url: &str) -> Router {
+async fn app(pool: PgPool, catalog_url: &str) -> (Router, IsolatedBroker) {
     app_with(pool, catalog_url, fast_resilience()).await
 }
 
-async fn app_with(pool: PgPool, catalog_url: &str, resilience: CatalogResilience) -> Router {
+async fn app_with(
+    pool: PgPool,
+    catalog_url: &str,
+    resilience: CatalogResilience,
+) -> (Router, IsolatedBroker) {
+    let broker = IsolatedBroker::connect().await;
     let config = AppConfig::from_source(&HashMap::new(), "orders").unwrap();
-    router(
+    let router = router(
         AppState::new(
             config,
             pool,
             CatalogClient::new(catalog_url, resilience),
-            event_bus().await,
+            broker.bus(),
         ),
         shared::metrics::init(),
-    )
+    );
+    (router, broker)
 }
 
 async fn send(app: &Router, method: Method, uri: &str, body: Option<Value>) -> (StatusCode, Value) {
@@ -199,7 +199,7 @@ fn has_series(metrics: &str, name: &str, labels: &[&str]) -> bool {
 async fn cria_pedido_com_precos_do_catalogo(pool: PgPool) {
     let (teclado, mouse) = (Uuid::new_v4(), Uuid::new_v4());
     let catalog = fake_catalog(vec![(teclado, 1_000, true), (mouse, 500, true)]).await;
-    let app = app(pool, &catalog).await;
+    let (app, _broker) = app(pool, &catalog).await;
 
     let (status, order) = create_order(
         &app,
@@ -233,7 +233,7 @@ async fn cria_pedido_com_precos_do_catalogo(pool: PgPool) {
 async fn produto_inexistente_ou_inativo_da_422(pool: PgPool) {
     let inativo = Uuid::new_v4();
     let catalog = fake_catalog(vec![(inativo, 100, false)]).await;
-    let app = app(pool, &catalog).await;
+    let (app, _broker) = app(pool, &catalog).await;
 
     let (status, body) = create_order(
         &app,
@@ -251,7 +251,7 @@ async fn produto_inexistente_ou_inativo_da_422(pool: PgPool) {
 
 #[sqlx::test]
 async fn catalogo_fora_do_ar_da_503(pool: PgPool) {
-    let app = app(pool, "http://127.0.0.1:1").await;
+    let (app, _broker) = app(pool, "http://127.0.0.1:1").await;
 
     let (status, body) = create_order(
         &app,
@@ -270,7 +270,7 @@ async fn catalogo_fora_do_ar_da_503(pool: PgPool) {
 async fn pedido_invalido_da_422(pool: PgPool) {
     let product = Uuid::new_v4();
     let catalog = fake_catalog(vec![(product, 100, true)]).await;
-    let app = app(pool, &catalog).await;
+    let (app, _broker) = app(pool, &catalog).await;
 
     let (status, _) = create_order(&app, json!([])).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -294,9 +294,9 @@ async fn pedido_invalido_da_422(pool: PgPool) {
 async fn publica_order_created_ao_criar_pedido(pool: PgPool) {
     let product = Uuid::new_v4();
     let catalog = fake_catalog(vec![(product, 1_000, true)]).await;
-    let app = app(pool, &catalog).await;
+    let (app, broker) = app(pool, &catalog).await;
 
-    let bus = event_bus().await;
+    let bus = broker.bus();
     let service = format!("test-orders-{}", Uuid::new_v4());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<OrderCreated>(8);
     let consumer = bus
@@ -315,16 +315,12 @@ async fn publica_order_created_ao_criar_pedido(pool: PgPool) {
     assert_eq!(status, StatusCode::CREATED, "{order}");
     let order_id = Uuid::parse_str(order["id"].as_str().unwrap()).unwrap();
 
-    let event = loop {
-        let event = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .expect("order.created não chegou em 5s")
-            .unwrap();
-        if event.order_id == order_id {
-            break event;
-        }
-    };
+    let event = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("order.created não chegou em 5s")
+        .unwrap();
 
+    assert_eq!(event.order_id, order_id);
     assert_eq!(event.total.cents(), 3_000);
     assert_eq!(event.items.len(), 1);
     assert_eq!(event.items[0].product_id, product);
@@ -351,7 +347,7 @@ async fn publica_order_created_ao_criar_pedido(pool: PgPool) {
 
 #[sqlx::test]
 async fn pedido_inexistente_da_404(pool: PgPool) {
-    let app = app(pool, "http://127.0.0.1:1").await;
+    let (app, _broker) = app(pool, "http://127.0.0.1:1").await;
     let id = Uuid::new_v4();
 
     let (status, _) = send(&app, Method::GET, &format!("/orders/{id}"), None).await;
@@ -367,7 +363,7 @@ async fn retry_recupera_de_falha_transitoria_do_catalogo(pool: PgPool) {
         Duration::ZERO,
     )
     .await;
-    let app = app(pool, &catalog).await;
+    let (app, _broker) = app(pool, &catalog).await;
 
     let (status, order) =
         create_order(&app, json!([{ "product_id": product, "quantity": 1 }])).await;
@@ -385,7 +381,7 @@ async fn nao_repete_a_chamada_quando_o_produto_nao_existe(pool: PgPool) {
         Duration::ZERO,
     )
     .await;
-    let app = app(pool, &catalog).await;
+    let (app, _broker) = app(pool, &catalog).await;
 
     let (status, _) = create_order(&app, json!([{ "product_id": product, "quantity": 1 }])).await;
 
@@ -406,7 +402,7 @@ async fn timeout_do_catalogo_da_503_sem_esperar_a_resposta(pool: PgPool) {
         retry: no_retry(),
         ..fast_resilience()
     };
-    let app = app_with(pool, &catalog, resilience).await;
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
 
     let started = Instant::now();
     let (status, body) =
@@ -438,7 +434,7 @@ async fn circuito_abre_falha_rapido_e_fecha_quando_o_catalogo_volta(pool: PgPool
         breaker_open_timeout: Duration::from_secs(1),
         ..fast_resilience()
     };
-    let app = app_with(pool, &catalog, resilience).await;
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
     let items = json!([{ "product_id": product, "quantity": 1 }]);
 
     for _ in 0..2 {
@@ -496,7 +492,7 @@ async fn fallback_usa_o_produto_em_cache_quando_o_catalogo_falha(pool: PgPool) {
         retry: no_retry(),
         ..fast_resilience()
     };
-    let app = app_with(pool, &catalog, resilience).await;
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
     let items = json!([{ "product_id": product, "quantity": 2 }]);
 
     let (status, _) = create_order(&app, items.clone()).await;
@@ -517,7 +513,7 @@ async fn fallback_usa_o_produto_em_cache_quando_o_catalogo_falha(pool: PgPool) {
 
 #[sqlx::test]
 async fn latencia_http_e_exposta_como_histograma_com_buckets(pool: PgPool) {
-    let app = app(pool, "http://127.0.0.1:1").await;
+    let (app, _broker) = app(pool, "http://127.0.0.1:1").await;
     send(
         &app,
         Method::GET,
@@ -552,7 +548,7 @@ async fn fallback_atende_com_o_circuito_aberto_sem_chamar_o_catalogo(pool: PgPoo
         breaker_failure_threshold: 1,
         ..fast_resilience()
     };
-    let app = app_with(pool, &catalog, resilience).await;
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
     let items = json!([{ "product_id": product, "quantity": 1 }]);
 
     for _ in 0..3 {
@@ -584,7 +580,7 @@ async fn produto_removido_do_catalogo_nao_volta_pelo_cache(pool: PgPool) {
         retry: no_retry(),
         ..fast_resilience()
     };
-    let app = app_with(pool, &catalog, resilience).await;
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
     let items = json!([{ "product_id": product, "quantity": 1 }]);
 
     let (status, _) = create_order(&app, items.clone()).await;

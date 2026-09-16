@@ -4,7 +4,8 @@ use std::time::Duration;
 
 use domain::events::Event;
 use serde::{Deserialize, Serialize};
-use shared::{AmqpConfig, EventBus};
+use shared::testing::IsolatedBroker;
+use shared::AmqpConfig;
 use uuid::Uuid;
 
 macro_rules! test_event {
@@ -79,10 +80,8 @@ async fn wait_for_dead_message(config: &AmqpConfig, queue: &str) -> Option<Vec<u
 
 #[tokio::test]
 async fn publica_e_consome_um_evento() {
-    let config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    let bus = EventBus::connect(&config)
-        .await
-        .expect("broker inacessível");
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
 
     let service = format!("test-{}", Uuid::new_v4());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<RoundTripEvent>(1);
@@ -111,17 +110,14 @@ async fn publica_e_consome_um_evento() {
     assert_eq!(received, sent);
 
     consumer.abort();
-    delete_queue_family(&config, &service, RoundTripEvent::ROUTING_KEY).await;
+    delete_queue_family(broker.config(), &service, RoundTripEvent::ROUTING_KEY).await;
 }
 
 #[tokio::test]
 async fn mensagem_com_falha_volta_pela_fila_de_retry() {
     let metrics = shared::metrics::init();
-    let mut config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    config.retry_ttl_ms = 300;
-    let bus = EventBus::connect(&config)
-        .await
-        .expect("broker inacessível");
+    let broker = IsolatedBroker::connect_with(|config| config.retry_ttl_ms = 300).await;
+    let bus = broker.bus();
 
     let service = format!("test-{}", Uuid::new_v4());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Uuid>(4);
@@ -164,18 +160,18 @@ async fn mensagem_com_falha_volta_pela_fila_de_retry() {
     ));
 
     consumer.abort();
-    delete_queue_family(&config, &service, RetryEvent::ROUTING_KEY).await;
+    delete_queue_family(broker.config(), &service, RetryEvent::ROUTING_KEY).await;
 }
 
 #[tokio::test]
 async fn mensagem_vai_para_a_fila_dead_apos_o_limite() {
     let metrics = shared::metrics::init();
-    let mut config = AmqpConfig::from_env().expect("AMQP_URL ausente (suba o docker-compose)");
-    config.retry_ttl_ms = 200;
-    config.max_attempts = 2;
-    let bus = EventBus::connect(&config)
-        .await
-        .expect("broker inacessível");
+    let broker = IsolatedBroker::connect_with(|config| {
+        config.retry_ttl_ms = 200;
+        config.max_attempts = 2;
+    })
+    .await;
+    let bus = broker.bus();
 
     let service = format!("test-{}", Uuid::new_v4());
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Uuid>(8);
@@ -201,7 +197,7 @@ async fn mensagem_vai_para_a_fila_dead_apos_o_limite() {
     assert_eq!(recv(&mut rx).await, event.id);
 
     let dead_queue = format!("{service}.{}.dead", DeadEvent::ROUTING_KEY);
-    let payload = wait_for_dead_message(&config, &dead_queue)
+    let payload = wait_for_dead_message(broker.config(), &dead_queue)
         .await
         .expect("mensagem não chegou na fila dead");
     let parked: DeadEvent = serde_json::from_slice(&payload).unwrap();
@@ -216,5 +212,5 @@ async fn mensagem_vai_para_a_fila_dead_apos_o_limite() {
     ));
 
     consumer.abort();
-    delete_queue_family(&config, &service, DeadEvent::ROUTING_KEY).await;
+    delete_queue_family(broker.config(), &service, DeadEvent::ROUTING_KEY).await;
 }
