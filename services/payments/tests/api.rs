@@ -13,7 +13,15 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 fn app(pool: PgPool) -> Router {
-    let config = AppConfig::from_source(&HashMap::new(), "payments").unwrap();
+    app_with_env(pool, &[])
+}
+
+fn app_with_env(pool: PgPool, env: &[(&str, &str)]) -> Router {
+    let vars = env
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    let config = AppConfig::from_source(&vars, "payments").unwrap();
     router(
         AppState::new(
             config,
@@ -189,4 +197,35 @@ async fn gateway_indisponivel_mantem_pagamento_pending(pool: PgPool) {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(payment["status"], "PENDING");
+}
+
+#[sqlx::test]
+async fn requisicao_que_estoura_o_timeout_do_servidor_da_504_e_entra_nas_metricas(pool: PgPool) {
+    let app = app_with_env(pool, &[("HTTP_REQUEST_TIMEOUT_MS", "200")]);
+    send(
+        &app,
+        Method::PATCH,
+        "/admin/gateway",
+        Some(json!({ "latency_ms": 2_000 })),
+    )
+    .await;
+
+    let started = std::time::Instant::now();
+    let (status, _) = pay(&app, Uuid::new_v4(), 1_000).await;
+
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "o servidor esperou o gateway em vez de cortar a requisição"
+    );
+
+    let metrics = shared::metrics::init().render();
+    assert!(
+        metrics.lines().any(|line| {
+            line.starts_with("http_request_duration_seconds_count")
+                && line.contains("path=\"/payments\"")
+                && line.contains("status=\"504\"")
+        }),
+        "timeout não registrado nas métricas HTTP"
+    );
 }

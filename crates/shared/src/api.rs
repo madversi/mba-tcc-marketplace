@@ -1,9 +1,16 @@
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use domain::DomainError;
 use serde::Serialize;
 use sqlx::PgPool;
+use tower_http::timeout::TimeoutLayer;
+
+pub fn request_timeout(timeout: Duration) -> TimeoutLayer {
+    TimeoutLayer::with_status_code(StatusCode::GATEWAY_TIMEOUT, timeout)
+}
 
 #[derive(Debug)]
 pub enum ApiError {

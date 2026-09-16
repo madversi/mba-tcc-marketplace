@@ -95,6 +95,7 @@ Os serviços leem a configuração de variáveis de ambiente. As que não aparec
 | `CATALOG_CACHE_TTL_SECS` | orders | `600` | Validade dos produtos no cache de fallback |
 | `AMQP_RETRY_TTL_MS` | todos | `5000` | Espera na fila `*.retry` |
 | `AMQP_MAX_ATTEMPTS` | todos | `3` | Tentativas antes da fila `*.dead` |
+| `HTTP_REQUEST_TIMEOUT_MS` | todos | `10000` | Tempo máximo por requisição; acima disso responde 504. Deve cobrir o orçamento das chamadas internas (tentativas × timeout do `catalog`) |
 | `LOG_LEVEL` / `LOG_FORMAT` | todos | `info` / `json` | Logs estruturados |
 
 O gateway também pode ser alterado em tempo de execução:

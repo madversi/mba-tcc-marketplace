@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::time::Duration;
 
 pub type EnvVars = HashMap<String, String>;
 
@@ -51,6 +52,7 @@ pub struct AppConfig {
     pub service_name: String,
     pub host: String,
     pub port: u16,
+    pub request_timeout: Duration,
     pub log: LogConfig,
 }
 
@@ -66,6 +68,11 @@ impl AppConfig {
                 .to_owned(),
             host: optional(vars, "HTTP_HOST").unwrap_or("0.0.0.0").to_owned(),
             port: parse_or(vars, "HTTP_PORT", 8080)?,
+            request_timeout: Duration::from_millis(parse_or(
+                vars,
+                "HTTP_REQUEST_TIMEOUT_MS",
+                10_000,
+            )?),
             log: LogConfig::from_source(vars)?,
         })
     }
@@ -176,6 +183,7 @@ mod tests {
 
         assert_eq!(cfg.service_name, "catalog");
         assert_eq!(cfg.bind_addr(), "0.0.0.0:8080");
+        assert_eq!(cfg.request_timeout, Duration::from_secs(10));
         assert_eq!(cfg.log.level, "info");
         assert_eq!(cfg.log.format, LogFormat::Pretty);
     }
@@ -187,6 +195,7 @@ mod tests {
                 ("SERVICE_NAME", "orders"),
                 ("HTTP_HOST", "127.0.0.1"),
                 ("HTTP_PORT", "8082"),
+                ("HTTP_REQUEST_TIMEOUT_MS", "250"),
                 ("LOG_FORMAT", "json"),
                 ("LOG_LEVEL", "debug"),
             ]),
@@ -196,6 +205,7 @@ mod tests {
 
         assert_eq!(cfg.service_name, "orders");
         assert_eq!(cfg.bind_addr(), "127.0.0.1:8082");
+        assert_eq!(cfg.request_timeout, Duration::from_millis(250));
         assert_eq!(cfg.log.level, "debug");
         assert_eq!(cfg.log.format, LogFormat::Json);
     }

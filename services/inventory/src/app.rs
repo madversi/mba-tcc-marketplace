@@ -33,6 +33,7 @@ impl AppState {
 }
 
 pub fn router(state: AppState, metrics: PrometheusHandle) -> Router {
+    let timeout = state.config.request_timeout;
     Router::new()
         .route("/health", get(health))
         .route(
@@ -42,6 +43,7 @@ pub fn router(state: AppState, metrics: PrometheusHandle) -> Router {
         .route("/stock/{product_id}/reserve", post(handlers::reserve))
         .route("/stock/{product_id}/release", post(handlers::release))
         .route("/stock/{product_id}/commit", post(handlers::commit))
+        .route_layer(shared::api::request_timeout(timeout))
         .route_layer(middleware::from_fn(track_http))
         .route("/metrics", get(move || shared::metrics::render(metrics)))
         .layer(TraceLayer::new_for_http())

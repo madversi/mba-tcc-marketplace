@@ -284,7 +284,10 @@ async fn wait_for_reservation(
     product_id: Uuid,
 ) -> Option<u32> {
     for _ in 0..30 {
-        stock.find_reservation(order_id, product_id).await.unwrap()?;
+        stock
+            .find_reservation(order_id, product_id)
+            .await
+            .unwrap()?;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     stock.find_reservation(order_id, product_id).await.unwrap()
