@@ -33,7 +33,7 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "container_memory_usage_bytes{name=~\"marketplace-.+\"}",
+          "expr": "container_memory_working_set_bytes{name=~\"marketplace-.+\"}",
           "legendFormat": "{{name}}"
         }
       ]

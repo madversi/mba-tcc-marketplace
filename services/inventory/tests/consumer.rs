@@ -346,3 +346,103 @@ async fn payment_approved_consome_a_reserva(pool: PgPool) {
     }
     delete_consumer_queues(&service).await;
 }
+
+async fn watch<E: domain::events::Event + 'static>(
+    bus: &shared::EventBus,
+) -> (
+    tokio::sync::mpsc::Receiver<E>,
+    tokio::task::JoinHandle<()>,
+    String,
+) {
+    let service = format!("test-watcher-{}", Uuid::new_v4());
+    let (tx, rx) = tokio::sync::mpsc::channel::<E>(16);
+    let handle = bus
+        .spawn_consumer::<E, _, _>(&service, move |event| {
+            let tx = tx.clone();
+            async move {
+                let _ = tx.send(event).await;
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+    (rx, handle, format!("{service}.{}", E::ROUTING_KEY))
+}
+
+#[sqlx::test]
+async fn order_created_reentregue_republica_sem_reservar_de_novo(pool: PgPool) {
+    let stock = StockRepository::new(pool);
+    let product_id = Uuid::new_v4();
+    stock.set_available(product_id, 10).await.unwrap();
+
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
+    let service = format!("test-inventory-{}", Uuid::new_v4());
+    let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
+        .await
+        .unwrap();
+    let (mut reserved_rx, reserved_watcher, reserved_queue) = watch::<StockReserved>(&bus).await;
+    let (mut rejected_rx, rejected_watcher, rejected_queue) = watch::<StockRejected>(&bus).await;
+
+    let event = order_created(
+        vec![OrderItem::new(product_id, 3, Money::from_cents(1_000)).unwrap()],
+        3_000,
+    );
+    bus.publish(&event).await.unwrap();
+    assert_eq!(recv(&mut reserved_rx).await.order_id, event.order_id);
+
+    bus.publish(&event).await.unwrap();
+    assert_eq!(recv(&mut reserved_rx).await.order_id, event.order_id);
+
+    let rejected = tokio::time::timeout(Duration::from_millis(500), rejected_rx.recv()).await;
+    assert!(rejected.is_err(), "reentrega virou stock.rejected");
+    let item = stock.find(product_id).await.unwrap().unwrap();
+    assert_eq!((item.available, item.reserved), (7, 3));
+
+    for handle in handles {
+        handle.abort();
+    }
+    reserved_watcher.abort();
+    rejected_watcher.abort();
+    delete_consumer_queues(&service).await;
+    delete_queue(&reserved_queue).await;
+    delete_queue(&rejected_queue).await;
+}
+
+#[sqlx::test]
+async fn rejeicao_reentregue_republica_o_mesmo_motivo(pool: PgPool) {
+    let stock = StockRepository::new(pool);
+    let product_id = Uuid::new_v4();
+    stock.set_available(product_id, 1).await.unwrap();
+
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
+    let service = format!("test-inventory-{}", Uuid::new_v4());
+    let handles = consumer::spawn(bus.clone(), stock.clone(), &service)
+        .await
+        .unwrap();
+    let (mut rejected_rx, rejected_watcher, rejected_queue) = watch::<StockRejected>(&bus).await;
+
+    let event = order_created(
+        vec![OrderItem::new(product_id, 5, Money::from_cents(1_000)).unwrap()],
+        5_000,
+    );
+    bus.publish(&event).await.unwrap();
+    let first = recv(&mut rejected_rx).await;
+
+    stock.set_available(product_id, 100).await.unwrap();
+    bus.publish(&event).await.unwrap();
+    let second = recv(&mut rejected_rx).await;
+
+    assert_eq!(second.order_id, event.order_id);
+    assert_eq!(second.reason, first.reason);
+    let item = stock.find(product_id).await.unwrap().unwrap();
+    assert_eq!((item.available, item.reserved), (100, 0));
+
+    for handle in handles {
+        handle.abort();
+    }
+    rejected_watcher.abort();
+    delete_consumer_queues(&service).await;
+    delete_queue(&rejected_queue).await;
+}

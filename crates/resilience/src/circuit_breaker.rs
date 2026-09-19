@@ -72,6 +72,8 @@ impl CircuitBreaker {
         Fut: Future<Output = Result<T, E>>,
     {
         if !self.allow_call() {
+            metrics::counter!("circuit_breaker_rejections_total", "breaker" => self.name.clone())
+                .increment(1);
             return Err(CircuitBreakerError::Open);
         }
 
@@ -145,6 +147,7 @@ impl CircuitBreaker {
             HALF_OPEN => "half_open",
             _ => "open",
         };
+        tracing::info!(breaker = %self.name, to = label, "transição do circuit breaker");
         metrics::counter!(
             "circuit_breaker_transitions_total",
             "breaker" => self.name.clone(),

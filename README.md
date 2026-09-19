@@ -23,9 +23,13 @@ carga e coletar as métricas.
 | Infraestrutura | Endereço | Acesso |
 |---|---|---|
 | RabbitMQ (UI) | http://localhost:15672 | `helder` / `marketplace` |
+| Toxiproxy (API) | http://localhost:8474 | — |
 | Prometheus | http://localhost:9090 | — |
-| Grafana | http://localhost:3000 | `admin` / `admin` |
+| Grafana (profile `grafana`) | http://localhost:3000 | `admin` / `admin` |
 | cAdvisor | http://localhost:8085 | — |
+
+O `orders` chama o `catalog` através do Toxiproxy (`http://toxiproxy:18080`), que
+injeta latência, indisponibilidade ou resets de conexão sem alterar os serviços.
 
 Fluxo de compra (saga coreografada): `POST /orders` grava o pedido `PENDING` e
 publica `order.created` → `inventory` reserva o estoque (`stock.reserved`) →
@@ -50,8 +54,14 @@ docker compose -f docker/docker-compose.yml ps
 
 O primeiro build compila o workspace inteiro e demora; os seguintes reaproveitam
 a camada de dependências (`cargo-chef`). Os serviços aplicam as próprias
-migrations ao subir. Para sobrescrever portas e credenciais, copie
+migrations ao subir. Para sobrescrever portas, credenciais e limites, copie
 `docker/.env.example` para `docker/.env`.
+
+Todos os containers têm limite de CPU e memória, e PostgreSQL, RabbitMQ e
+Toxiproxy estão fixados por digest, para que as medições sejam comparáveis entre
+execuções. O Grafana fica fora da subida padrão (não disputa recursos durante a
+coleta); para inspecionar os painéis:
+`docker compose -f docker/docker-compose.yml --profile grafana up -d grafana`.
 
 Para derrubar mantendo os dados: `docker compose -f docker/docker-compose.yml down`.
 Com `-v`, apaga também os volumes (bancos, filas e séries do Prometheus).
@@ -80,6 +90,15 @@ Os serviços leem a configuração de variáveis de ambiente. As que não aparec
 
 | Variável | Serviço | Padrão | Efeito |
 |---|---|---|---|
+| `CATALOG_TIMEOUT_ENABLED` | orders | `true` | Liga o timeout do cliente do catálogo |
+| `CATALOG_RETRY_ENABLED` | orders | `true` | Liga o retry (desligado: uma única tentativa) |
+| `CATALOG_BREAKER_ENABLED` | orders | `true` | Liga o circuit breaker do catálogo |
+| `CATALOG_FALLBACK_ENABLED` | orders | `true` | Liga o cache de fallback do catálogo |
+| `GATEWAY_BREAKER_ENABLED` | payments | `true` | Liga o circuit breaker do gateway |
+| `PAYMENT_REPROCESS_ENABLED` | payments | `true` | Desligado: gateway fora falha o pagamento na hora, sem `payment.pending` |
+| `AMQP_CONSUMER_CONCURRENCY` | todos | `1` | Mensagens processadas em paralelo por fila (o prefetch sobe junto) |
+| `TOKIO_WORKER_THREADS` | todos | `2` no compose | Threads do runtime Tokio |
+| `SERVICE_CPUS` / `SERVICE_MEMORY` | compose | `1.0` / `256m` | Limites dos 4 serviços Rust (há variáveis equivalentes para Postgres, RabbitMQ, Toxiproxy e k6) |
 | `FAILURE_RATE` | payments | `0` | Chance (0–1) de o gateway ficar indisponível |
 | `LATENCY_MS` | payments | `0` | Atraso artificial por cobrança |
 | `UNAVAILABLE` | payments | `false` | Força o gateway indisponível |
@@ -96,7 +115,11 @@ Os serviços leem a configuração de variáveis de ambiente. As que não aparec
 | `AMQP_RETRY_TTL_MS` | todos | `5000` | Espera na fila `*.retry` |
 | `AMQP_MAX_ATTEMPTS` | todos | `3` | Tentativas antes da fila `*.dead` |
 | `HTTP_REQUEST_TIMEOUT_MS` | todos | `10000` | Tempo máximo por requisição; acima disso responde 504. Deve cobrir o orçamento das chamadas internas (tentativas × timeout do `catalog`) |
-| `LOG_LEVEL` / `LOG_FORMAT` | todos | `info` / `json` | Logs estruturados |
+| `LOG_LEVEL` / `LOG_FORMAT` | todos | `info` / `pretty` (`json` no compose) | Logs estruturados |
+
+Cada serviço registra no log, ao subir, a configuração efetiva de resiliência e
+expõe a métrica `resilience_mechanism_enabled{mechanism}` (0 ou 1), usada para
+conferir a condição de cada execução.
 
 O gateway também pode ser alterado em tempo de execução:
 
@@ -117,10 +140,8 @@ cp .env.example .env
 cargo test --workspace
 ```
 
-O teste `estoque_insuficiente_publica_stock_rejected` pode falhar
-esporadicamente na suíte completa: os testes compartilham o exchange do broker e
-consumidores de testes paralelos respondem ao mesmo evento. Rodado isoladamente
-(`cargo test -p inventory --test consumer estoque_insuficiente`), passa.
+Cada teste de mensageria usa um exchange próprio (`shared::testing::IsolatedBroker`),
+então a suíte pode rodar em paralelo.
 
 ## Testes de carga (k6)
 
@@ -140,33 +161,48 @@ Parâmetros vão como variáveis de ambiente antes do nome do serviço, por exem
 
 | Cenário | O que mede | Duração padrão | Parâmetros |
 |---|---|---|---|
-| `baseline.js` | Comportamento saudável sob carga constante | 2 min | `RATE` (10), `DURATION` |
+| `baseline.js` | Comportamento saudável sob carga constante | 1 min de aquecimento + 2 min | `RATE` (10), `AQUECIMENTO`, `DURATION` |
 | `stress.js` | Ponto de degradação, em patamares até o pico | ~13 min | `PEAK_RATE` (200), `LEVELS`, `RAMP`, `HOLD` |
 | `spike.js` | Reação a um pico súbito e recuperação | ~4 min | `BASE_RATE` (10), `SPIKE_RATE` (150), `SPIKE_HOLD`, `RECOVERY` |
-| `falhas.js` | Resiliência com falhas injetadas | 5 min | `FALHA`, `RATE`, `WARMUP`, `FAILURE_WINDOW`, `RECOVERY` |
+| `falhas.js` | Resiliência com falhas injetadas | 6 min | `FALHA`, `RATE`, `AQUECIMENTO`, `WARMUP`, `FAILURE_WINDOW`, `RECOVERY` |
 
-Todos os cenários usam carga em modelo aberto (taxa de chegada fixa) e registram
-duas métricas próprias: `saga_duration` (do `POST /orders` até o pedido chegar a
-`CONFIRMED` ou `CANCELLED`) e `saga_confirmed` (taxa de pedidos confirmados).
-Stress, spike e falhas acompanham só uma amostra das sagas (`SAGA_SAMPLE`).
+Todos os cenários usam carga em modelo aberto (taxa de chegada fixa) e marcam
+cada requisição com a fase em que ela ocorreu (`aquecimento`, `antes`, `falha`,
+`depois`, ...). A fase de aquecimento deve ser descartada na análise.
 
-**Leitura dos resultados:** stress, spike e falhas marcam cada requisição com a
-fase em que ela ocorreu e avaliam os SLOs por fase (POST com p95 < 500 ms e menos
-de 1% de erro; saga confirmada em mais de 99%). É esperado que stress e spike
-terminem com thresholds violados: o resultado é *em qual fase* isso acontece.
+**Tempo das sagas:** por padrão o k6 não acompanha as sagas (`SAGA_SAMPLE=0`).
+Consultar `GET /orders/{id}` em loop gera carga proporcional à duração das
+sagas, justamente o que se quer medir. O tempo de conclusão sai do banco
+(`orders.updated_at` do estado final − `orders.created_at`), para todos os
+pedidos. `SAGA_SAMPLE` > 0 volta a ligar as métricas `saga_duration` e
+`saga_confirmed` no k6, só para inspeção manual.
+
+**Leitura dos resultados:** os SLOs são avaliados por fase (POST com p95 < 500 ms
+e menos de 1% de erro). É esperado que stress, spike e falhas terminem com
+thresholds violados (código de saída 99): o resultado é *em qual fase* isso
+acontece.
 
 ### Cenários de falha
 
-Cada experimento tem 1 min normal, 1 min de falha e 3 min de recuperação.
+Cada execução tem 1 min de aquecimento, 1 min normal, 1 min de falha e 3 min de
+recuperação.
 
 | `FALHA` | Injeção |
 |---|---|
+| `catalogo-lento` | Toxiproxy atrasa as respostas do catálogo (`CATALOG_LATENCY_MS`, padrão 2000) |
+| `catalogo-indisponivel` | Toxiproxy desliga o proxy do catálogo (conexão recusada) |
+| `catalogo-instavel` | Toxiproxy reseta conexões com probabilidade `TOXICITY` (padrão 0.3) |
 | `gateway-indisponivel` | Gateway recusa todas as cobranças |
 | `gateway-instavel` | `FAILURE_RATE` (padrão 0.5) |
 | `gateway-lento` | `LATENCY_MS` (padrão 2000) |
 | `servico-parado` | Container de `catalog`, `inventory` ou `payments` parado |
 
-Falhas no gateway são aplicadas pelo próprio k6, via endpoint admin:
+O Toxiproxy aplica falhas por conexão, e o cliente HTTP reaproveita conexões. Por
+isso a taxa efetiva de falhas do `catalogo-instavel` deve ser lida na métrica
+`catalog_client_requests_total{outcome}`, não presumida a partir de `TOXICITY`.
+
+Falhas no gateway e no catálogo são aplicadas pelo próprio k6, via endpoint admin
+e API do Toxiproxy:
 
 ```bash
 docker compose -f docker/docker-compose.yml --profile load run --rm \
@@ -184,6 +220,74 @@ resumo em `load-tests/results/` automaticamente):
 O k6 imprime marcadores no início e no fim da janela de falha, e o script para
 (`docker compose stop -t 0`) e religa o container ao vê-los. Se o teste for
 interrompido, o gateway é restaurado e o container é religado.
+
+## Execução dos experimentos
+
+`load-tests/experimento.ps1` executa o protocolo completo de cada experimento do
+TCC. Para cada execução ele:
+
+1. Recria bancos, filas e serviços do zero com a configuração da condição.
+2. Roda o k6 salvando cada requisição (`k6.csv.gz`) e o resumo (`summary.json`).
+3. Espera a drenagem: nenhum pedido fora de `CONFIRMED`/`CANCELLED` e nenhuma
+   mensagem pendente (exceto nas filas `.dead`).
+4. Exporta as séries do Prometheus, as tabelas do banco e os logs.
+5. Grava os metadados e valida a execução.
+
+```powershell
+.\load-tests\experimento.ps1 -Experimento 2A -Repeticoes 10 -Taxa 20
+.\load-tests\experimento.ps1 -Experimento 1A -Repeticoes 5 -Taxas 10,20,40,60,80,100
+.\load-tests\experimento.ps1 -Experimento 3A -Repeticoes 3 -Condicoes R-ON   # só uma condição (piloto)
+```
+
+| Experimento | Condições | Falha |
+|---|---|---|
+| `1A` | uma por taxa em `-Taxas` (tudo ligado) | — |
+| `1B` | `C0-ROFF` (tudo desligado) × `C4-RON` (tudo ligado) | — |
+| `2A` | `C0` a `C4` | `catalogo-lento` |
+| `2B` | `C0`, `C2`, `C3`, `C4` | `catalogo-indisponivel` |
+| `3A` | `R-ON` × `R-OFF` | `gateway-indisponivel` |
+| `4A` | `parado-<servico>` (`-ServicoParado`, padrão `payments`) | `servico-parado` |
+
+Níveis do cliente do catálogo, cumulativos:
+
+| Nível | Timeout | Retry | Circuit breaker | Fallback |
+|---|---|---|---|---|
+| `C0` | — | — | — | — |
+| `C1` | ✓ | — | — | — |
+| `C2` | ✓ | ✓ | — | — |
+| `C3` | ✓ | ✓ | ✓ | — |
+| `C4` | ✓ | ✓ | ✓ | ✓ |
+
+Cada repetição é um bloco com todas as condições em ordem sorteada (`-Semente`,
+registrada). `-RepeticaoInicial` continua uma série interrompida sem repetir o
+sorteio dos blocos anteriores. As imagens são reconstruídas no início (`-SemBuild`
+pula). Se houver alterações sem commit, o script avisa: o hash registrado não
+descreveria exatamente o código medido.
+
+Resultados em `load-tests/results/experimentos/<exp>/<condição>/rep-NN/`:
+
+| Arquivo | Conteúdo |
+|---|---|
+| `k6.csv.gz` | Uma linha por amostra de cada métrica do k6, com a tag `phase` |
+| `summary.json` | Resumo do k6 (percentis por fase) |
+| `sql/pedidos.csv` | Pedidos com estado final, `created_at` e `updated_at` |
+| `sql/pagamentos.csv`, `sql/estoque.csv`, `sql/reservas.csv`, `sql/resultados_reserva.csv` | Estado final para os invariantes de consistência |
+| `prometheus/*.json` | Séries de CPU, memória (working set), filas, mensagens, breaker, fallback, tentativas ao catálogo, reprocessamento e mecanismos ativos |
+| `logs/` | Saída do k6 e logs JSON dos serviços (incluem as transições do circuit breaker) |
+| `metadata.json` | Condição, horários UTC (início, falha, fim), parâmetros, commit, imagens, hardware, drenagem e validade |
+
+`<exp>/execucoes.csv` lista todas as execuções com a indicação de validade.
+Uma execução é marcada como inválida, sem ser apagada, se:
+
+- o k6 terminou com código diferente de 0 ou 99 (99 = thresholds violados, esperado nas falhas);
+- mais de 1% das iterações foram descartadas pelo k6 (`-LimiteDescarte`);
+- algum comando de controle (injeção de falha) falhou;
+- a drenagem não terminou em `-DrenagemMaxSegundos`;
+- algum container reiniciou ou sofreu OOM;
+- a CPU do k6 passou de 80% do seu limite.
+
+Antes de rodar: pare o PostgreSQL nativo do Windows se estiver ativo, feche
+programas pesados e mantenha o notebook na tomada.
 
 ## Coleta de métricas
 
@@ -211,8 +315,12 @@ Para exportar os dados de um painel: menu do painel → *Inspect* → *Data* →
 | Estado dos circuit breakers | `max by (breaker) (circuit_breaker_state)` (0 fechado, 1 meio-aberto, 2 aberto) |
 | Ativações do fallback | `sum(increase(fallback_activations_total[5m]))` |
 | Retries e fila dead | `sum by (queue) (increase(message_retry_total[5m]))`, `sum by (queue) (message_dead_total)` |
+| Chamadas rejeitadas pelo circuito aberto | `sum by (breaker) (increase(circuit_breaker_rejections_total[5m]))` |
+| Tentativas ao catálogo por resultado | `sum by (outcome) (increase(catalog_client_requests_total[5m]))` |
+| Mensagens na fila (prontas + em processamento) | `sum by (queue) (rabbitmq_queue_messages_ready) + sum by (queue) (rabbitmq_queue_messages_unacked)` |
+| Mecanismos ativos | `max by (job, mechanism) (resilience_mechanism_enabled)` |
 | CPU por container | `sum by (name) (rate(container_cpu_usage_seconds_total{name=~"marketplace-.+"}[1m]))` |
-| Memória por container | `container_memory_usage_bytes{name=~"marketplace-.+"}` |
+| Memória por container | `container_memory_working_set_bytes{name=~"marketplace-.+"}` |
 
 Série temporal de um experimento pela API (horários em UTC):
 
@@ -224,17 +332,11 @@ curl -G localhost:9090/api/v1/query_range \
   --data-urlencode 'step=5s'
 ```
 
-### Procedimento sugerido por experimento
+Para os experimentos do TCC, use o `experimento.ps1`, que exporta essas séries
+automaticamente. O Grafana serve só para inspeção visual.
 
-1. Anotar o horário de início.
-2. Rodar o cenário com `--summary-export` para `load-tests/results/`.
-3. Anotar o horário de término e exportar os painéis do Grafana nesse intervalo.
-4. Para repetir do zero, exportar o que for necessário e só então
-   `docker compose -f docker/docker-compose.yml down -v`, que apaga também as
-   séries do Prometheus.
-
-O container `marketplace-k6` aparece no cAdvisor: o consumo do gerador de carga
-fica separado do consumo dos serviços, mas divide a mesma máquina.
+O container do k6 aparece no cAdvisor: o consumo do gerador de carga fica
+separado do consumo dos serviços, mas divide a mesma máquina.
 
 ## Solução de problemas
 
@@ -267,5 +369,12 @@ consultas com `rate()` precisam de tráfego e de pelo menos dois scrapes.
   transacional).
 - Pagamentos criados diretamente por `POST /payments` que ficarem pendentes não
   entram no reprocessamento; só o fluxo da saga é reprocessado.
-- Cada fila é consumida uma mensagem por vez. Com `LATENCY_MS` alto, o
-  processamento de pagamentos vira gargalo e as filas acumulam.
+- Por padrão cada fila é consumida uma mensagem por vez
+  (`AMQP_CONSUMER_CONCURRENCY=1`). Com `LATENCY_MS` alto, o processamento de
+  pagamentos vira gargalo e as filas acumulam.
+- Não há reconexão ao RabbitMQ: se o broker cair, os consumidores param até o
+  serviço ser reiniciado. Falha do broker fica fora dos experimentos.
+- O gateway de pagamento é simulado dentro do próprio `payments`; o breaker do
+  gateway não passa por rede.
+- A cobrança no gateway não tem timeout; o timeout só existe na chamada ao
+  catálogo e no limite de cada requisição HTTP.

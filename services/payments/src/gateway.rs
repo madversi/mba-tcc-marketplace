@@ -103,6 +103,7 @@ impl SimulatedGateway {
 
 #[derive(Debug, Clone, Copy)]
 pub struct GatewayResilience {
+    pub breaker_enabled: bool,
     pub breaker_failure_threshold: u32,
     pub breaker_open_timeout: Duration,
 }
@@ -114,6 +115,7 @@ impl GatewayResilience {
 
     pub fn from_source(vars: &EnvVars) -> Result<Self, ConfigError> {
         Ok(Self {
+            breaker_enabled: parse_or(vars, "GATEWAY_BREAKER_ENABLED", true)?,
             breaker_failure_threshold: parse_or(vars, "GATEWAY_BREAKER_FAILURE_THRESHOLD", 5)?,
             breaker_open_timeout: Duration::from_millis(parse_or(
                 vars,
@@ -127,18 +129,23 @@ impl GatewayResilience {
 #[derive(Clone)]
 pub struct GatewayClient {
     gateway: SimulatedGateway,
-    breaker: Arc<CircuitBreaker>,
+    breaker: Option<Arc<CircuitBreaker>>,
 }
 
 impl GatewayClient {
     pub fn new(gateway: SimulatedGateway, resilience: GatewayResilience) -> Self {
+        resilience::report_mechanism("gateway_circuit_breaker", resilience.breaker_enabled);
+        tracing::info!(?resilience, "resiliência do gateway de pagamento");
+
         Self {
             gateway,
-            breaker: Arc::new(CircuitBreaker::new(
-                "payment_gateway",
-                resilience.breaker_failure_threshold,
-                resilience.breaker_open_timeout,
-            )),
+            breaker: resilience.breaker_enabled.then(|| {
+                Arc::new(CircuitBreaker::new(
+                    "payment_gateway",
+                    resilience.breaker_failure_threshold,
+                    resilience.breaker_open_timeout,
+                ))
+            }),
         }
     }
 
@@ -146,12 +153,15 @@ impl GatewayClient {
         &self.gateway
     }
 
-    pub fn circuit_state(&self) -> CircuitState {
-        self.breaker.state()
+    pub fn circuit_state(&self) -> Option<CircuitState> {
+        self.breaker.as_ref().map(|breaker| breaker.state())
     }
 
     pub async fn charge(&self, payment: &Payment) -> Result<ChargeOutcome, GatewayError> {
-        self.breaker
+        let Some(breaker) = &self.breaker else {
+            return self.gateway.charge(payment).await;
+        };
+        breaker
             .call(|| self.gateway.charge(payment))
             .await
             .map_err(|err| match err {
@@ -215,6 +225,7 @@ mod tests {
         let client = GatewayClient::new(
             gateway.clone(),
             GatewayResilience {
+                breaker_enabled: true,
                 breaker_failure_threshold: 2,
                 breaker_open_timeout: Duration::from_secs(30),
             },
@@ -225,11 +236,49 @@ mod tests {
             let result = client.charge(&payment()).await;
             assert!(matches!(result, Err(GatewayError::Unavailable)));
         }
-        assert_eq!(client.circuit_state(), CircuitState::Open);
+        assert_eq!(client.circuit_state(), Some(CircuitState::Open));
 
         gateway.set_unavailable(false);
         let result = client.charge(&payment()).await;
         assert!(matches!(result, Err(GatewayError::CircuitOpen)));
+    }
+
+    #[tokio::test]
+    async fn cliente_sem_circuit_breaker_sempre_chama_o_gateway() {
+        let gateway = SimulatedGateway::default();
+        let client = GatewayClient::new(
+            gateway.clone(),
+            GatewayResilience {
+                breaker_enabled: false,
+                breaker_failure_threshold: 1,
+                breaker_open_timeout: Duration::from_secs(30),
+            },
+        );
+
+        gateway.set_unavailable(true);
+        for _ in 0..3 {
+            let result = client.charge(&payment()).await;
+            assert!(matches!(result, Err(GatewayError::Unavailable)));
+        }
+        assert_eq!(client.circuit_state(), None);
+
+        gateway.set_unavailable(false);
+        let result = client.charge(&payment()).await;
+        assert!(matches!(result, Ok(ChargeOutcome::Approved)));
+    }
+
+    #[test]
+    fn circuit_breaker_do_gateway_pode_ser_desligado() {
+        let vars = EnvVars::from([("GATEWAY_BREAKER_ENABLED".to_owned(), "false".to_owned())]);
+
+        let cfg = GatewayResilience::from_source(&vars).unwrap();
+
+        assert!(!cfg.breaker_enabled);
+        assert!(
+            GatewayResilience::from_source(&EnvVars::new())
+                .unwrap()
+                .breaker_enabled
+        );
     }
 
     #[test]

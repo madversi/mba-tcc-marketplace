@@ -7,6 +7,7 @@ export const urls = {
   orders: __ENV.ORDERS_URL || 'http://localhost:8082',
   inventory: __ENV.INVENTORY_URL || 'http://localhost:8083',
   payments: __ENV.PAYMENTS_URL || 'http://localhost:8084',
+  toxiproxy: __ENV.TOXIPROXY_URL || 'http://localhost:8474',
 };
 
 export const sagaDuration = new Trend('saga_duration', true);
@@ -67,21 +68,61 @@ export function phaseAt(plan, elapsedMs) {
   return plan[plan.length - 1].phase;
 }
 
-export function sloThresholds(phases, sagaDurationLimitsMs) {
+export function sloThresholds(phases, sagaDurationLimitsMs, withSaga) {
   const limits = sagaDurationLimitsMs || {};
   const scopes = phases.length ? phases : [null];
   const thresholds = {};
   scopes.forEach((phase) => {
     const order = phase ? `{name:POST /orders,phase:${phase}}` : '{name:POST /orders}';
-    const saga = phase ? `{phase:${phase}}` : '';
     thresholds[`http_req_failed${order}`] = [SLO.orderFailedRate];
     thresholds[`http_req_duration${order}`] = [SLO.orderP95];
+    if (withSaga === false) {
+      return;
+    }
+    const saga = phase ? `{phase:${phase}}` : '';
     thresholds[`saga_confirmed${saga}`] = [SLO.sagaConfirmedRate];
     thresholds[`saga_duration${saga}`] = [
       phase && limits[phase] ? `p(95)<${limits[phase]}` : SLO.sagaP95,
     ];
   });
   return thresholds;
+}
+
+function control(response, description, expectedStatus) {
+  return check(
+    response,
+    { [description]: (r) => r.status === expectedStatus },
+    { tipo: 'controle' },
+  );
+}
+
+export function resetToxiproxy() {
+  const response = http.post(`${urls.toxiproxy}/reset`, null, params('POST /reset', { tipo: 'controle' }));
+  return control(response, 'toxiproxy restaurado (204)', 204);
+}
+
+export function setCatalogProxyEnabled(enabled) {
+  const response = http.post(
+    `${urls.toxiproxy}/proxies/catalog`,
+    JSON.stringify({ enabled: enabled }),
+    params('POST /proxies/catalog', { tipo: 'controle' }),
+  );
+  return control(response, `proxy do catálogo ${enabled ? 'ligado' : 'desligado'} (200)`, 200);
+}
+
+export function addCatalogToxic(name, type, attributes, toxicity) {
+  const response = http.post(
+    `${urls.toxiproxy}/proxies/catalog/toxics`,
+    JSON.stringify({
+      name: name,
+      type: type,
+      stream: 'downstream',
+      toxicity: toxicity === undefined ? 1.0 : toxicity,
+      attributes: attributes,
+    }),
+    params('POST /proxies/catalog/toxics', { tipo: 'controle' }),
+  );
+  return control(response, `toxic ${name} aplicado (200)`, 200);
 }
 
 export function configureGateway(settings) {

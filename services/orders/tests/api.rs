@@ -103,10 +103,14 @@ async fn scripted_catalog(
 
 fn fast_resilience() -> CatalogResilience {
     CatalogResilience {
+        timeout_enabled: true,
         timeout: Duration::from_millis(300),
+        retry_enabled: true,
         retry: RetryPolicy::new(3, Duration::from_millis(10), Duration::from_millis(50)),
+        breaker_enabled: true,
         breaker_failure_threshold: 5,
         breaker_open_timeout: Duration::from_secs(30),
+        fallback_enabled: true,
         cache_ttl: Duration::from_secs(60),
         cache_max_entries: 100,
     }
@@ -591,4 +595,193 @@ async fn produto_removido_do_catalogo_nao_volta_pelo_cache(pool: PgPool) {
 
     let (status, body) = create_order(&app, items).await;
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+}
+
+#[sqlx::test]
+async fn retry_desligado_faz_uma_unica_tentativa(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let (catalog, hits) = scripted_catalog(
+        (product, 1_000, true),
+        vec![StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK],
+        Duration::ZERO,
+    )
+    .await;
+    let resilience = CatalogResilience {
+        retry_enabled: false,
+        ..fast_resilience()
+    };
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
+
+    let (status, body) =
+        create_order(&app, json!([{ "product_id": product, "quantity": 1 }])).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    assert_eq!(hits.load(Ordering::SeqCst), 1);
+}
+
+#[sqlx::test]
+async fn timeout_desligado_espera_o_catalogo_responder(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let (catalog, _) = scripted_catalog(
+        (product, 1_000, true),
+        vec![StatusCode::OK],
+        Duration::from_millis(600),
+    )
+    .await;
+    let resilience = CatalogResilience {
+        timeout_enabled: false,
+        retry_enabled: false,
+        ..fast_resilience()
+    };
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
+
+    let (status, order) =
+        create_order(&app, json!([{ "product_id": product, "quantity": 1 }])).await;
+
+    assert_eq!(status, StatusCode::CREATED, "{order}");
+}
+
+#[sqlx::test]
+async fn circuit_breaker_desligado_continua_chamando_o_catalogo(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let (catalog, hits) = scripted_catalog(
+        (product, 1_000, true),
+        vec![StatusCode::INTERNAL_SERVER_ERROR],
+        Duration::ZERO,
+    )
+    .await;
+    let resilience = CatalogResilience {
+        retry_enabled: false,
+        breaker_enabled: false,
+        breaker_failure_threshold: 1,
+        ..fast_resilience()
+    };
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
+    let items = json!([{ "product_id": product, "quantity": 1 }]);
+
+    for _ in 0..4 {
+        let (status, body) = create_order(&app, items.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert!(
+            !body["error"].as_str().unwrap().contains("circuito aberto"),
+            "{body}"
+        );
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 4);
+}
+
+#[sqlx::test]
+async fn fallback_desligado_nao_usa_o_cache(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let (catalog, _) = scripted_catalog(
+        (product, 1_000, true),
+        vec![StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR],
+        Duration::ZERO,
+    )
+    .await;
+    let resilience = CatalogResilience {
+        retry_enabled: false,
+        fallback_enabled: false,
+        ..fast_resilience()
+    };
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
+    let items = json!([{ "product_id": product, "quantity": 1 }]);
+
+    let (status, _) = create_order(&app, items.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = create_order(&app, items).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+}
+
+#[sqlx::test]
+async fn todos_os_mecanismos_desligados_repassam_a_falha_na_hora(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let (catalog, hits) = scripted_catalog(
+        (product, 1_000, true),
+        vec![StatusCode::OK, StatusCode::INTERNAL_SERVER_ERROR],
+        Duration::ZERO,
+    )
+    .await;
+    let resilience = CatalogResilience {
+        breaker_failure_threshold: 1,
+        ..fast_resilience().all_disabled()
+    };
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
+    let items = json!([{ "product_id": product, "quantity": 1 }]);
+
+    let (status, _) = create_order(&app, items.clone()).await;
+    assert_eq!(status, StatusCode::CREATED);
+    for _ in 0..2 {
+        let (status, _) = create_order(&app, items.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 3);
+}
+
+#[sqlx::test]
+async fn tentativas_ao_catalogo_e_mecanismos_ativos_sao_expostos(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let (catalog, _) = scripted_catalog(
+        (product, 1_000, true),
+        vec![StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK],
+        Duration::ZERO,
+    )
+    .await;
+    let resilience = CatalogResilience {
+        fallback_enabled: false,
+        ..fast_resilience()
+    };
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
+
+    let (status, _) = create_order(&app, json!([{ "product_id": product, "quantity": 1 }])).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let metrics = metrics_text(&app).await;
+    for outcome in ["server_error", "ok"] {
+        assert!(
+            has_series(
+                &metrics,
+                "catalog_client_requests_total",
+                &[&format!("outcome=\"{outcome}\"")]
+            ),
+            "tentativa com resultado {outcome} não exposta:\n{metrics}"
+        );
+    }
+    assert!(has_series(
+        &metrics,
+        "resilience_mechanism_enabled",
+        &["mechanism=\"catalog_fallback\""]
+    ));
+}
+
+#[sqlx::test]
+async fn chamada_rejeitada_pelo_circuito_aberto_e_contada(pool: PgPool) {
+    let product = Uuid::new_v4();
+    let (catalog, _) = scripted_catalog(
+        (product, 1_000, true),
+        vec![StatusCode::INTERNAL_SERVER_ERROR],
+        Duration::ZERO,
+    )
+    .await;
+    let resilience = CatalogResilience {
+        retry_enabled: false,
+        fallback_enabled: false,
+        breaker_failure_threshold: 1,
+        ..fast_resilience()
+    };
+    let (app, _broker) = app_with(pool, &catalog, resilience).await;
+    let items = json!([{ "product_id": product, "quantity": 1 }]);
+
+    for _ in 0..2 {
+        let (status, _) = create_order(&app, items.clone()).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    let metrics = metrics_text(&app).await;
+    assert!(has_series(
+        &metrics,
+        "circuit_breaker_rejections_total",
+        &["breaker=\"catalog\""]
+    ));
 }

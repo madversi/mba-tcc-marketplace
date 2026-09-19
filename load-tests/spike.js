@@ -15,7 +15,7 @@ const SPIKE_RAMP = __ENV.SPIKE_RAMP || '5s';
 const SPIKE_HOLD = __ENV.SPIKE_HOLD || '1m';
 const RECOVERY = __ENV.RECOVERY || '2m';
 const PRODUCTS = Number(__ENV.PRODUCTS || 20);
-const SAGA_SAMPLE = Number(__ENV.SAGA_SAMPLE || 0.1);
+const SAGA_SAMPLE = Number(__ENV.SAGA_SAMPLE || 0);
 const SAGA_TIMEOUT_MS = Number(__ENV.SAGA_TIMEOUT_MS || 30000);
 const POLL_MS = Number(__ENV.POLL_MS || 100);
 
@@ -38,7 +38,7 @@ export const options = {
       maxVUs: SPIKE_RATE * 2,
     },
   },
-  thresholds: sloThresholds(['antes', 'pico', 'depois']),
+  thresholds: sloThresholds(['antes', 'pico', 'depois'], {}, SAGA_SAMPLE > 0),
 };
 
 export function setup() {

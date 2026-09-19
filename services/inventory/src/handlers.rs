@@ -12,6 +12,7 @@ impl From<StockError> for ApiError {
     fn from(err: StockError) -> Self {
         match err {
             StockError::NotFound => Self::NotFound("estoque do produto"),
+            StockError::AlreadyProcessed => Self::Conflict(err.to_string()),
             StockError::Domain(e) => e.into(),
             StockError::Db(e) => e.into(),
         }

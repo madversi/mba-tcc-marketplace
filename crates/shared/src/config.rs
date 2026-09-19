@@ -146,6 +146,7 @@ pub struct AmqpConfig {
     pub prefetch: u16,
     pub retry_ttl_ms: u64,
     pub max_attempts: u32,
+    pub consumer_concurrency: usize,
 }
 
 impl AmqpConfig {
@@ -162,6 +163,7 @@ impl AmqpConfig {
             prefetch: parse_or(vars, "AMQP_PREFETCH", 16)?,
             retry_ttl_ms: parse_or(vars, "AMQP_RETRY_TTL_MS", 5_000)?,
             max_attempts: parse_or(vars, "AMQP_MAX_ATTEMPTS", 3)?,
+            consumer_concurrency: parse_or(vars, "AMQP_CONSUMER_CONCURRENCY", 1_usize)?.max(1),
         })
     }
 }
@@ -273,6 +275,20 @@ mod tests {
         assert_eq!(cfg.prefetch, 16);
         assert_eq!(cfg.retry_ttl_ms, 5_000);
         assert_eq!(cfg.max_attempts, 3);
+        assert_eq!(cfg.consumer_concurrency, 1);
+    }
+
+    #[test]
+    fn concorrencia_do_consumidor_nunca_fica_abaixo_de_um() {
+        let url = ("AMQP_URL", "amqp://guest:guest@localhost:5672/%2f");
+
+        let zero =
+            AmqpConfig::from_source(&vars(&[url, ("AMQP_CONSUMER_CONCURRENCY", "0")])).unwrap();
+        let eight =
+            AmqpConfig::from_source(&vars(&[url, ("AMQP_CONSUMER_CONCURRENCY", "8")])).unwrap();
+
+        assert_eq!(zero.consumer_concurrency, 1);
+        assert_eq!(eight.consumer_concurrency, 8);
     }
 
     #[test]

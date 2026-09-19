@@ -41,6 +41,7 @@ fn client(gateway: SimulatedGateway) -> GatewayClient {
     GatewayClient::new(
         gateway,
         GatewayResilience {
+            breaker_enabled: true,
             breaker_failure_threshold: 5,
             breaker_open_timeout: Duration::from_millis(200),
         },
@@ -49,6 +50,7 @@ fn client(gateway: SimulatedGateway) -> GatewayClient {
 
 fn reprocessing(interval_ms: u64, timeout_ms: u64) -> Reprocessing {
     Reprocessing {
+        enabled: true,
         interval: Duration::from_millis(interval_ms),
         timeout: Duration::from_millis(timeout_ms),
     }
@@ -317,4 +319,62 @@ async fn reprocessamento_esgotado_falha_o_pagamento(pool: PgPool) {
     failed_watcher.abort();
     delete_consumer_queues(&service).await;
     delete_queue(&failed_queue).await;
+}
+
+#[sqlx::test]
+async fn reprocessamento_desligado_falha_o_pagamento_na_hora(pool: PgPool) {
+    let payments_repo = PaymentRepository::new(pool);
+    let broker = IsolatedBroker::connect().await;
+    let bus = broker.bus();
+    let gateway = SimulatedGateway::default();
+    gateway.set_unavailable(true);
+
+    let service = format!("test-payments-{}", Uuid::new_v4());
+    let handles = consumer::spawn(
+        bus.clone(),
+        payments_repo.clone(),
+        client(gateway),
+        Reprocessing {
+            enabled: false,
+            ..reprocessing(200, 30_000)
+        },
+        &service,
+    )
+    .await
+    .unwrap();
+    let (mut failed_rx, failed_watcher, failed_queue) = watch::<PaymentFailed>(&bus).await;
+    let (mut pending_rx, pending_watcher, pending_queue) = watch::<PaymentPending>(&bus).await;
+
+    let order_id = Uuid::new_v4();
+    bus.publish(&StockReserved {
+        order_id,
+        amount: Money::from_cents(1_500),
+        occurred_at: domain::time::now(),
+    })
+    .await
+    .unwrap();
+
+    let failed = recv(&mut failed_rx).await;
+    assert_eq!(failed.order_id, order_id);
+    let payment = payments_repo
+        .find_by_order(order_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(payment.status, PaymentStatus::Failed);
+
+    let pending = tokio::time::timeout(Duration::from_millis(500), pending_rx.recv()).await;
+    assert!(
+        pending.is_err(),
+        "publicou payment.pending com o reprocessamento desligado"
+    );
+
+    for handle in handles {
+        handle.abort();
+    }
+    failed_watcher.abort();
+    pending_watcher.abort();
+    delete_consumer_queues(&service).await;
+    delete_queue(&failed_queue).await;
+    delete_queue(&pending_queue).await;
 }

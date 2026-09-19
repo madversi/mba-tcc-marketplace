@@ -2,7 +2,8 @@ use std::error::Error;
 use std::future::Future;
 
 use domain::events::Event;
-use futures_util::StreamExt;
+use futures_util::{future, StreamExt};
+use lapin::message::Delivery;
 use lapin::options::{
     BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions, BasicQosOptions,
     ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
@@ -31,14 +32,18 @@ pub struct EventBus {
     exchange: String,
     retry_ttl_ms: u64,
     max_attempts: u32,
+    consumer_concurrency: usize,
 }
 
 impl EventBus {
     pub async fn connect(config: &AmqpConfig) -> Result<Self, AmqpError> {
         let connection = Connection::connect(&config.url, ConnectionProperties::default()).await?;
         let channel = connection.create_channel().await?;
+        let prefetch = config
+            .prefetch
+            .max(u16::try_from(config.consumer_concurrency).unwrap_or(u16::MAX));
         channel
-            .basic_qos(config.prefetch, BasicQosOptions::default())
+            .basic_qos(prefetch, BasicQosOptions::default())
             .await?;
 
         let bus = Self {
@@ -46,6 +51,7 @@ impl EventBus {
             exchange: config.exchange.clone(),
             retry_ttl_ms: config.retry_ttl_ms,
             max_attempts: config.max_attempts,
+            consumer_concurrency: config.consumer_concurrency,
         };
 
         bus.declare_exchange(&bus.exchange, ExchangeKind::Topic)
@@ -107,7 +113,7 @@ impl EventBus {
             )
             .await?;
 
-        let mut consumer = self
+        let consumer = self
             .channel
             .basic_consume(
                 &queue,
@@ -120,70 +126,35 @@ impl EventBus {
         let channel = self.channel.clone();
         let dead_exchange = self.dead_exchange();
         let max_attempts = self.max_attempts;
+        let concurrency = self.consumer_concurrency;
 
         let handle = tokio::spawn(async move {
-            while let Some(delivery) = consumer.next().await {
-                let delivery = match delivery {
-                    Ok(delivery) => delivery,
-                    Err(err) => {
-                        tracing::error!(%queue, %err, "consumo interrompido");
-                        break;
-                    }
-                };
+            let queue = queue.as_str();
+            let handler = &handler;
+            let channel = &channel;
+            let dead_exchange = dead_exchange.as_str();
 
-                let span = tracing::info_span!("message_processing", %queue);
-                async {
-                    let start = std::time::Instant::now();
-                    let outcome = match serde_json::from_slice::<E>(&delivery.data) {
-                        Ok(event) => handler(event).await,
-                        Err(err) => Err(HandlerError::from(err)),
-                    };
-                    let elapsed = start.elapsed().as_secs_f64();
-
-                    let status = if outcome.is_ok() { "ok" } else { "error" };
-                    metrics::histogram!(
-                        "message_processing_duration_seconds",
-                        "queue" => queue.clone(),
-                        "status" => status,
-                    )
-                    .record(elapsed);
-
-                    let result = match outcome {
-                        Ok(()) => delivery.ack(BasicAckOptions::default()).await,
+            consumer
+                .scan((), |_, delivery| {
+                    future::ready(match delivery {
+                        Ok(delivery) => Some(delivery),
                         Err(err) => {
-                            let attempt = failed_attempts(&delivery.properties, &queue) + 1;
-                            if attempt >= max_attempts {
-                                metrics::counter!("message_dead_total", "queue" => queue.clone())
-                                    .increment(1);
-                                tracing::error!(
-                                    %queue, %err, attempt,
-                                    "tentativas esgotadas; enviando para a fila dead"
-                                );
-                                send_to_dead(&channel, &dead_exchange, &queue, &delivery).await;
-                                delivery.ack(BasicAckOptions::default()).await
-                            } else {
-                                metrics::counter!("message_retry_total", "queue" => queue.clone())
-                                    .increment(1);
-                                tracing::warn!(
-                                    %queue, %err, attempt,
-                                    "handler falhou; mensagem vai para a fila retry"
-                                );
-                                delivery
-                                    .nack(BasicNackOptions {
-                                        requeue: false,
-                                        ..Default::default()
-                                    })
-                                    .await
-                            }
+                            tracing::error!(%queue, %err, "consumo interrompido");
+                            None
                         }
-                    };
-                    if let Err(err) = result {
-                        tracing::error!(%queue, %err, "falha ao confirmar mensagem");
-                    }
-                }
-                .instrument(span)
+                    })
+                })
+                .for_each_concurrent(concurrency, |delivery| {
+                    process_delivery(
+                        handler,
+                        channel,
+                        dead_exchange,
+                        queue,
+                        max_attempts,
+                        delivery,
+                    )
+                })
                 .await;
-            }
         });
 
         Ok(handle)
@@ -289,12 +260,73 @@ impl EventBus {
     }
 }
 
-async fn send_to_dead(
+async fn process_delivery<E, F, Fut>(
+    handler: &F,
     channel: &Channel,
     dead_exchange: &str,
     queue: &str,
-    delivery: &lapin::message::Delivery,
-) {
+    max_attempts: u32,
+    delivery: Delivery,
+) where
+    E: Event,
+    F: Fn(E) -> Fut,
+    Fut: Future<Output = Result<(), HandlerError>>,
+{
+    let span = tracing::info_span!("message_processing", %queue);
+    async {
+        let start = std::time::Instant::now();
+        let outcome = match serde_json::from_slice::<E>(&delivery.data) {
+            Ok(event) => handler(event).await,
+            Err(err) => Err(HandlerError::from(err)),
+        };
+        let elapsed = start.elapsed().as_secs_f64();
+
+        let status = if outcome.is_ok() { "ok" } else { "error" };
+        metrics::histogram!(
+            "message_processing_duration_seconds",
+            "queue" => queue.to_owned(),
+            "status" => status,
+        )
+        .record(elapsed);
+
+        let result = match outcome {
+            Ok(()) => delivery.ack(BasicAckOptions::default()).await,
+            Err(err) => {
+                let attempt = failed_attempts(&delivery.properties, queue) + 1;
+                if attempt >= max_attempts {
+                    metrics::counter!("message_dead_total", "queue" => queue.to_owned())
+                        .increment(1);
+                    tracing::error!(
+                        %queue, %err, attempt,
+                        "tentativas esgotadas; enviando para a fila dead"
+                    );
+                    send_to_dead(channel, dead_exchange, queue, &delivery).await;
+                    delivery.ack(BasicAckOptions::default()).await
+                } else {
+                    metrics::counter!("message_retry_total", "queue" => queue.to_owned())
+                        .increment(1);
+                    tracing::warn!(
+                        %queue, %err, attempt,
+                        "handler falhou; mensagem vai para a fila retry"
+                    );
+                    delivery
+                        .nack(BasicNackOptions {
+                            requeue: false,
+                            ..Default::default()
+                        })
+                        .await
+                }
+            }
+        };
+        if let Err(err) = result {
+            tracing::error!(%queue, %err, "falha ao confirmar mensagem");
+        }
+    }
+    .instrument(span)
+    .await;
+}
+
+async fn send_to_dead(channel: &Channel, dead_exchange: &str, queue: &str, delivery: &Delivery) {
     let published = channel
         .basic_publish(
             dead_exchange,

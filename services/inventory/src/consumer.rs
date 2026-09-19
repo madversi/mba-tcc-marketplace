@@ -4,7 +4,7 @@ use shared::EventBus;
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
-use crate::repository::{StockError, StockRepository};
+use crate::repository::{ReservationOutcome, StockError, StockRepository};
 
 pub async fn spawn(
     bus: EventBus,
@@ -62,8 +62,25 @@ async fn handle_order_created(
         .map(|item| (item.product_id, item.quantity))
         .collect();
 
-    match stock.reserve_many(event.order_id, &items).await {
-        Ok(()) => {
+    let outcome = match stock.reserve_many(event.order_id, &items).await {
+        Ok(()) => ReservationOutcome::Reserved,
+        Err(StockError::AlreadyProcessed) => recorded_outcome(stock, event.order_id).await?,
+        Err(err @ (StockError::NotFound | StockError::Domain(_))) => {
+            let reason = reject_reason(&err);
+            if stock.record_rejection(event.order_id, &reason).await? {
+                ReservationOutcome::Rejected(reason)
+            } else {
+                recorded_outcome(stock, event.order_id).await?
+            }
+        }
+        Err(StockError::Db(err)) => {
+            tracing::error!(order_id = %event.order_id, %err, "erro de banco ao reservar estoque");
+            return Err(err.into());
+        }
+    };
+
+    match outcome {
+        ReservationOutcome::Reserved => {
             bus.publish(&StockReserved {
                 order_id: event.order_id,
                 amount: event.total,
@@ -71,25 +88,38 @@ async fn handle_order_created(
             })
             .await?;
         }
-        Err(err) => {
+        ReservationOutcome::Rejected(reason) => {
             bus.publish(&StockRejected {
                 order_id: event.order_id,
-                reason: reject_reason(err),
+                reason,
                 occurred_at: domain::time::now(),
             })
             .await?;
+        }
+        settled @ (ReservationOutcome::Committed | ReservationOutcome::Released) => {
+            tracing::info!(
+                order_id = %event.order_id,
+                ?settled,
+                "order.created reentregue depois da reserva liquidada; ignorado"
+            );
         }
     }
     Ok(())
 }
 
-fn reject_reason(err: StockError) -> String {
+async fn recorded_outcome(
+    stock: &StockRepository,
+    order_id: Uuid,
+) -> Result<ReservationOutcome, HandlerError> {
+    Ok(stock
+        .find_outcome(order_id)
+        .await?
+        .ok_or("resultado da reserva não encontrado")?)
+}
+
+fn reject_reason(err: &StockError) -> String {
     match err {
         StockError::NotFound => "produto sem estoque cadastrado".to_owned(),
-        StockError::Domain(e) => e.to_string(),
-        StockError::Db(e) => {
-            tracing::error!(err = %e, "erro de banco ao reservar estoque");
-            "erro interno ao reservar estoque".to_owned()
-        }
+        other => other.to_string(),
     }
 }

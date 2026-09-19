@@ -9,8 +9,40 @@ pub enum StockError {
     NotFound,
     #[error(transparent)]
     Domain(#[from] DomainError),
+    #[error("pedido já processado pelo estoque")]
+    AlreadyProcessed,
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReservationOutcome {
+    Reserved,
+    Rejected(String),
+    Committed,
+    Released,
+}
+
+#[derive(FromRow)]
+struct OutcomeRow {
+    outcome: String,
+    reason: Option<String>,
+}
+
+impl TryFrom<OutcomeRow> for ReservationOutcome {
+    type Error = sqlx::Error;
+
+    fn try_from(row: OutcomeRow) -> Result<Self, Self::Error> {
+        match row.outcome.as_str() {
+            "RESERVED" => Ok(Self::Reserved),
+            "REJECTED" => Ok(Self::Rejected(row.reason.unwrap_or_default())),
+            "COMMITTED" => Ok(Self::Committed),
+            "RELEASED" => Ok(Self::Released),
+            other => Err(sqlx::Error::Decode(
+                format!("resultado de reserva desconhecido: {other}").into(),
+            )),
+        }
+    }
 }
 
 #[derive(FromRow)]
@@ -101,6 +133,19 @@ impl StockRepository {
         sorted.sort_by_key(|(product_id, _)| *product_id);
 
         let mut tx = self.pool.begin().await?;
+        let claimed = sqlx::query(
+            "INSERT INTO reservation_outcomes (order_id, outcome, updated_at) \
+             VALUES ($1, 'RESERVED', $2) ON CONFLICT (order_id) DO NOTHING",
+        )
+        .bind(order_id)
+        .bind(domain::time::now())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if claimed == 0 {
+            return Err(StockError::AlreadyProcessed);
+        }
+
         for (product_id, quantity) in &sorted {
             Self::apply_locked(&mut tx, *product_id, |s| s.reserve(*quantity)).await?;
         }
@@ -118,13 +163,39 @@ impl StockRepository {
         Ok(())
     }
 
+    pub async fn record_rejection(&self, order_id: Uuid, reason: &str) -> sqlx::Result<bool> {
+        let inserted = sqlx::query(
+            "INSERT INTO reservation_outcomes (order_id, outcome, reason, updated_at) \
+             VALUES ($1, 'REJECTED', $2, $3) ON CONFLICT (order_id) DO NOTHING",
+        )
+        .bind(order_id)
+        .bind(reason)
+        .bind(domain::time::now())
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(inserted == 1)
+    }
+
+    pub async fn find_outcome(&self, order_id: Uuid) -> sqlx::Result<Option<ReservationOutcome>> {
+        sqlx::query_as::<_, OutcomeRow>(
+            "SELECT outcome, reason FROM reservation_outcomes WHERE order_id = $1",
+        )
+        .bind(order_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .map(ReservationOutcome::try_from)
+        .transpose()
+    }
+
     pub async fn release_reserved(&self, order_id: Uuid) -> Result<(), StockError> {
-        self.settle_reservations(order_id, |s, q| s.release(q))
+        self.settle_reservations(order_id, "RELEASED", |s, q| s.release(q))
             .await
     }
 
     pub async fn commit_reserved(&self, order_id: Uuid) -> Result<(), StockError> {
-        self.settle_reservations(order_id, |s, q| s.commit(q)).await
+        self.settle_reservations(order_id, "COMMITTED", |s, q| s.commit(q))
+            .await
     }
 
     pub async fn find_reservation(
@@ -147,6 +218,7 @@ impl StockRepository {
     async fn settle_reservations(
         &self,
         order_id: Uuid,
+        outcome: &'static str,
         apply: impl Fn(&mut StockItem, u32) -> Result<(), DomainError>,
     ) -> Result<(), StockError> {
         let mut tx = self.pool.begin().await?;
@@ -168,6 +240,16 @@ impl StockRepository {
             .bind(order_id)
             .execute(&mut *tx)
             .await?;
+
+        sqlx::query(
+            "UPDATE reservation_outcomes SET outcome = $2, updated_at = $3 \
+             WHERE order_id = $1 AND outcome = 'RESERVED'",
+        )
+        .bind(order_id)
+        .bind(outcome)
+        .bind(domain::time::now())
+        .execute(&mut *tx)
+        .await?;
 
         tx.commit().await?;
         Ok(())
@@ -336,5 +418,91 @@ mod tests {
 
         repo.release_reserved(Uuid::new_v4()).await.unwrap();
         repo.commit_reserved(Uuid::new_v4()).await.unwrap();
+    }
+
+    #[sqlx::test]
+    async fn reserva_repetida_do_mesmo_pedido_nao_reserva_de_novo(pool: PgPool) {
+        let repo = StockRepository::new(pool);
+        let order_id = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        repo.set_available(a, 10).await.unwrap();
+        repo.reserve_many(order_id, &[(a, 3)]).await.unwrap();
+
+        let err = repo.reserve_many(order_id, &[(a, 3)]).await.unwrap_err();
+
+        assert!(matches!(err, StockError::AlreadyProcessed));
+        let item = repo.find(a).await.unwrap().unwrap();
+        assert_eq!((item.available, item.reserved), (7, 3));
+        assert_eq!(
+            repo.find_outcome(order_id).await.unwrap(),
+            Some(ReservationOutcome::Reserved)
+        );
+    }
+
+    #[sqlx::test]
+    async fn reserva_depois_da_liquidacao_nao_consome_estoque_de_novo(pool: PgPool) {
+        let repo = StockRepository::new(pool);
+        let order_id = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        repo.set_available(a, 10).await.unwrap();
+        repo.reserve_many(order_id, &[(a, 3)]).await.unwrap();
+        repo.commit_reserved(order_id).await.unwrap();
+
+        let err = repo.reserve_many(order_id, &[(a, 3)]).await.unwrap_err();
+
+        assert!(matches!(err, StockError::AlreadyProcessed));
+        let item = repo.find(a).await.unwrap().unwrap();
+        assert_eq!((item.available, item.reserved), (7, 0));
+        assert_eq!(
+            repo.find_outcome(order_id).await.unwrap(),
+            Some(ReservationOutcome::Committed)
+        );
+    }
+
+    #[sqlx::test]
+    async fn liberacao_registra_o_resultado(pool: PgPool) {
+        let repo = StockRepository::new(pool);
+        let order_id = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        repo.set_available(a, 10).await.unwrap();
+        repo.reserve_many(order_id, &[(a, 3)]).await.unwrap();
+
+        repo.release_reserved(order_id).await.unwrap();
+        repo.commit_reserved(order_id).await.unwrap();
+
+        let item = repo.find(a).await.unwrap().unwrap();
+        assert_eq!((item.available, item.reserved), (10, 0));
+        assert_eq!(
+            repo.find_outcome(order_id).await.unwrap(),
+            Some(ReservationOutcome::Released)
+        );
+    }
+
+    #[sqlx::test]
+    async fn reserva_que_falha_nao_deixa_resultado_e_rejeicao_e_registrada_uma_vez(pool: PgPool) {
+        let repo = StockRepository::new(pool);
+        let order_id = Uuid::new_v4();
+        let a = Uuid::new_v4();
+        repo.set_available(a, 1).await.unwrap();
+
+        let err = repo.reserve_many(order_id, &[(a, 5)]).await.unwrap_err();
+        assert!(matches!(err, StockError::Domain(_)));
+        assert_eq!(repo.find_outcome(order_id).await.unwrap(), None);
+
+        assert!(repo.record_rejection(order_id, "sem saldo").await.unwrap());
+        assert!(!repo
+            .record_rejection(order_id, "outro motivo")
+            .await
+            .unwrap());
+        assert_eq!(
+            repo.find_outcome(order_id).await.unwrap(),
+            Some(ReservationOutcome::Rejected("sem saldo".to_owned()))
+        );
+
+        repo.set_available(a, 10).await.unwrap();
+        let err = repo.reserve_many(order_id, &[(a, 5)]).await.unwrap_err();
+        assert!(matches!(err, StockError::AlreadyProcessed));
+        let item = repo.find(a).await.unwrap().unwrap();
+        assert_eq!((item.available, item.reserved), (10, 0));
     }
 }

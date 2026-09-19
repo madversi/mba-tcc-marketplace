@@ -7,6 +7,7 @@ x-service: &service
   environment: &service-env
     HTTP_PORT: 8080
     LOG_FORMAT: json
+    TOKIO_WORKER_THREADS: ${TOKIO_WORKER_THREADS:-2}
   depends_on:
     postgres:
       condition: service_healthy
@@ -16,11 +17,17 @@ x-service: &service
     timeout: 3s
     retries: 5
     start_period: 5s
+  cpus: ${SERVICE_CPUS:-1.0}
+  mem_limit: ${SERVICE_MEMORY:-256m}
   restart: unless-stopped
+
+x-amqp-env: &amqp-env
+  AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
+  AMQP_CONSUMER_CONCURRENCY: ${AMQP_CONSUMER_CONCURRENCY:-1}
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
     container_name: marketplace-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-marketplace}
@@ -37,10 +44,12 @@ services:
       timeout: 3s
       retries: 10
       start_period: 5s
+    cpus: ${POSTGRES_CPUS:-2.0}
+    mem_limit: ${POSTGRES_MEMORY:-1g}
     restart: unless-stopped
 
   rabbitmq:
-    image: rabbitmq:3-management-alpine
+    image: rabbitmq:3-management-alpine@sha256:606d8c0d6b3c18d1da9afc53bc7cdb2a8d5486df91b5a9830e9e07626c9ae281
     container_name: marketplace-rabbitmq
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-helder}
@@ -56,6 +65,20 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+    cpus: ${RABBITMQ_CPUS:-1.0}
+    mem_limit: ${RABBITMQ_MEMORY:-1g}
+    restart: unless-stopped
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0@sha256:9378ed52a28bc50edc1350f936f518f31fa95f0d15917d6eb40b8e376d1a214e
+    container_name: marketplace-toxiproxy
+    command: ["-host=0.0.0.0", "-config=/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      - "${TOXIPROXY_API_PORT:-8474}:8474"
+    cpus: ${TOXIPROXY_CPUS:-0.5}
+    mem_limit: ${TOXIPROXY_MEMORY:-128m}
     restart: unless-stopped
 
   catalog:
@@ -83,10 +106,13 @@ services:
     image: marketplace/orders
     container_name: marketplace-orders
     environment:
-      <<: *service-env
+      <<: [*service-env, *amqp-env]
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/orders
-      CATALOG_URL: http://catalog:8080
-      AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
+      CATALOG_URL: ${CATALOG_URL:-http://toxiproxy:18080}
+      CATALOG_TIMEOUT_ENABLED: ${CATALOG_TIMEOUT_ENABLED:-true}
+      CATALOG_RETRY_ENABLED: ${CATALOG_RETRY_ENABLED:-true}
+      CATALOG_BREAKER_ENABLED: ${CATALOG_BREAKER_ENABLED:-true}
+      CATALOG_FALLBACK_ENABLED: ${CATALOG_FALLBACK_ENABLED:-true}
     ports:
       - "8082:8080"
     depends_on:
@@ -96,6 +122,8 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
+      toxiproxy:
+        condition: service_started
 
   inventory:
     <<: *service
@@ -107,9 +135,8 @@ services:
     image: marketplace/inventory
     container_name: marketplace-inventory
     environment:
-      <<: *service-env
+      <<: [*service-env, *amqp-env]
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/inventory
-      AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
     ports:
       - "8083:8080"
     depends_on:
@@ -128,12 +155,13 @@ services:
     image: marketplace/payments
     container_name: marketplace-payments
     environment:
-      <<: *service-env
+      <<: [*service-env, *amqp-env]
       DATABASE_URL: postgres://${POSTGRES_USER:-marketplace}:${POSTGRES_PASSWORD:-marketplace}@postgres:5432/payments
-      AMQP_URL: amqp://${RABBITMQ_USER:-helder}:${RABBITMQ_PASSWORD:-marketplace}@rabbitmq:5672/%2f
       FAILURE_RATE: ${FAILURE_RATE:-0}
       LATENCY_MS: ${LATENCY_MS:-0}
       UNAVAILABLE: ${UNAVAILABLE:-false}
+      GATEWAY_BREAKER_ENABLED: ${GATEWAY_BREAKER_ENABLED:-true}
+      PAYMENT_REPROCESS_ENABLED: ${PAYMENT_REPROCESS_ENABLED:-true}
     ports:
       - "8084:8080"
     depends_on:
@@ -155,11 +183,14 @@ services:
       - orders
       - inventory
       - payments
+    cpus: ${PROMETHEUS_CPUS:-0.5}
+    mem_limit: ${PROMETHEUS_MEMORY:-512m}
     restart: unless-stopped
 
   grafana:
     image: grafana/grafana:11.4.0
     container_name: marketplace-grafana
+    profiles: ["grafana"]
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
@@ -183,6 +214,8 @@ services:
       - /var/run:/var/run:ro
       - /sys:/sys:ro
       - /var/lib/docker/:/var/lib/docker:ro
+    cpus: ${CADVISOR_CPUS:-0.5}
+    mem_limit: ${CADVISOR_MEMORY:-256m}
     restart: unless-stopped
 
   k6:
@@ -197,6 +230,9 @@ services:
       ORDERS_URL: http://orders:8080
       INVENTORY_URL: http://inventory:8080
       PAYMENTS_URL: http://payments:8080
+      TOXIPROXY_URL: http://toxiproxy:8474
+    cpus: ${K6_CPUS:-2.0}
+    mem_limit: ${K6_MEMORY:-1g}
 
 volumes:
   postgres-data:

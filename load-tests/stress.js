@@ -13,7 +13,7 @@ const LEVELS = (__ENV.LEVELS || '0.25,0.5,0.75,1').split(',').map(Number);
 const RAMP = __ENV.RAMP || '1m';
 const HOLD = __ENV.HOLD || '2m';
 const PRODUCTS = Number(__ENV.PRODUCTS || 20);
-const SAGA_SAMPLE = Number(__ENV.SAGA_SAMPLE || 0.1);
+const SAGA_SAMPLE = Number(__ENV.SAGA_SAMPLE || 0);
 const SAGA_TIMEOUT_MS = Number(__ENV.SAGA_TIMEOUT_MS || 30000);
 const POLL_MS = Number(__ENV.POLL_MS || 100);
 
@@ -38,7 +38,7 @@ export const options = {
       maxVUs: PEAK_RATE * 2,
     },
   },
-  thresholds: sloThresholds(HOLD_PHASES),
+  thresholds: sloThresholds(HOLD_PHASES, {}, SAGA_SAMPLE > 0),
 };
 
 export function setup() {

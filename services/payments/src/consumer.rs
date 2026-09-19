@@ -12,6 +12,7 @@ use crate::repository::PaymentRepository;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Reprocessing {
+    pub enabled: bool,
     pub interval: Duration,
     pub timeout: Duration,
 }
@@ -23,6 +24,7 @@ impl Reprocessing {
 
     pub fn from_source(vars: &EnvVars) -> Result<Self, ConfigError> {
         Ok(Self {
+            enabled: parse_or(vars, "PAYMENT_REPROCESS_ENABLED", true)?,
             interval: Duration::from_millis(parse_or(
                 vars,
                 "PAYMENT_REPROCESS_INTERVAL_MS",
@@ -56,6 +58,9 @@ pub async fn spawn(
     reprocessing: Reprocessing,
     service: &str,
 ) -> Result<Vec<JoinHandle<()>>, AmqpError> {
+    resilience::report_mechanism("payment_reprocessing", reprocessing.enabled);
+    tracing::info!(?reprocessing, "reprocessamento de pagamentos");
+
     let mut handles = Vec::with_capacity(2);
 
     let publisher = bus.clone();
@@ -66,7 +71,9 @@ pub async fn spawn(
             let bus = publisher.clone();
             let payments = repo.clone();
             let gateway = client.clone();
-            async move { handle_stock_reserved(&bus, &payments, &gateway, event).await }
+            async move {
+                handle_stock_reserved(&bus, &payments, &gateway, reprocessing, event).await
+            }
         })
         .await?,
     );
@@ -94,6 +101,7 @@ async fn handle_stock_reserved(
     bus: &EventBus,
     payments: &PaymentRepository,
     gateway: &GatewayClient,
+    reprocessing: Reprocessing,
     event: StockReserved,
 ) -> Result<(), HandlerError> {
     let mut payment = match payments.find_by_order(event.order_id).await? {
@@ -111,6 +119,17 @@ async fn handle_stock_reserved(
 
     match attempt_charge(payments, gateway, &mut payment).await? {
         Attempt::Settled => publish_result(bus, &payment).await,
+        Attempt::GatewayDown(err) if !reprocessing.enabled => {
+            tracing::warn!(
+                payment_id = %payment.id,
+                order_id = %payment.order_id,
+                %err,
+                "reprocessamento desligado; pagamento falhou"
+            );
+            payment.fail(err.to_string())?;
+            payments.update_status(&payment).await?;
+            publish_result(bus, &payment).await
+        }
         Attempt::GatewayDown(err) => {
             tracing::warn!(
                 payment_id = %payment.id,
@@ -236,6 +255,7 @@ mod tests {
     #[test]
     fn limite_da_fila_retry_nao_vence_antes_do_prazo() {
         let cfg = Reprocessing {
+            enabled: true,
             interval: Duration::from_secs(5),
             timeout: Duration::from_secs(300),
         };

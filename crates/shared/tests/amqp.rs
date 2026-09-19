@@ -214,3 +214,63 @@ async fn mensagem_vai_para_a_fila_dead_apos_o_limite() {
     consumer.abort();
     delete_queue_family(broker.config(), &service, DeadEvent::ROUTING_KEY).await;
 }
+
+test_event!(ConcurrencyEvent, "test.shared.concurrency");
+
+async fn max_in_flight(concurrency: usize, messages: u32) -> u32 {
+    let broker =
+        IsolatedBroker::connect_with(|config| config.consumer_concurrency = concurrency).await;
+    let bus = broker.bus();
+
+    let service = format!("test-{}", Uuid::new_v4());
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<Uuid>(messages as usize);
+    let in_flight = Arc::new(AtomicU32::new(0));
+    let peak = Arc::new(AtomicU32::new(0));
+
+    let (current, highest) = (in_flight.clone(), peak.clone());
+    let consumer = bus
+        .spawn_consumer::<ConcurrencyEvent, _, _>(&service, move |event: ConcurrencyEvent| {
+            let tx = tx.clone();
+            let current = current.clone();
+            let highest = highest.clone();
+            async move {
+                let now = current.fetch_add(1, Ordering::SeqCst) + 1;
+                highest.fetch_max(now, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                current.fetch_sub(1, Ordering::SeqCst);
+                tx.send(event.id).await.unwrap();
+                Ok(())
+            }
+        })
+        .await
+        .unwrap();
+
+    for i in 0..messages {
+        bus.publish(&ConcurrencyEvent {
+            id: Uuid::new_v4(),
+            message: format!("mensagem {i}"),
+        })
+        .await
+        .unwrap();
+    }
+    for _ in 0..messages {
+        recv(&mut rx).await;
+    }
+
+    consumer.abort();
+    delete_queue_family(broker.config(), &service, ConcurrencyEvent::ROUTING_KEY).await;
+    peak.load(Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn consumidor_padrao_processa_uma_mensagem_por_vez() {
+    assert_eq!(max_in_flight(1, 4).await, 1);
+}
+
+#[tokio::test]
+async fn consumidor_processa_mensagens_em_paralelo_ate_o_limite() {
+    let peak = max_in_flight(3, 6).await;
+
+    assert!(peak > 1, "nenhuma mensagem foi processada em paralelo");
+    assert!(peak <= 3, "passou do limite de concorrência: {peak}");
+}
