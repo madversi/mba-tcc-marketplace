@@ -24,6 +24,19 @@
 
 $ErrorActionPreference = 'Stop'
 
+if (-not (Get-Command 'docker-credential-desktop' -ErrorAction SilentlyContinue)) {
+    $candidatos = @(
+        (Join-Path $env:LOCALAPPDATA 'Programs\DockerDesktop\resources\bin'),
+        (Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin')
+    )
+    foreach ($dir in $candidatos) {
+        if (Test-Path (Join-Path $dir 'docker-credential-desktop.exe')) {
+            $env:PATH = "$dir;$env:PATH"
+            break
+        }
+    }
+}
+
 $raiz = Resolve-Path (Join-Path $PSScriptRoot '..')
 $compose = Join-Path $raiz 'docker\docker-compose.yml'
 $saidaBase = Join-Path $PSScriptRoot 'results\experimentos'
@@ -228,6 +241,14 @@ function Invoke-K6($condicao, [string]$relativo, [string]$dirLogs) {
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr
     $null = $processo.Handle
 
+    $containerK6 = $null
+    while (-not $containerK6 -and -not $processo.HasExited) {
+        $containerK6 = Invoke-Docker @(
+            'ps', '--no-trunc', '--filter', 'label=com.docker.compose.service=k6', '--format', '{{.ID}}'
+        ) -IgnorarErro | Where-Object { "$_" -match '^[0-9a-f]{64}$' } | Select-Object -First 1
+        if (-not $containerK6) { Start-Sleep -Milliseconds 500 }
+    }
+
     $parada = $null
     if ($condicao.K6['FALHA'] -eq 'servico-parado') {
         $servico = $condicao.K6['SERVICO']
@@ -256,12 +277,13 @@ function Invoke-K6($condicao, [string]$relativo, [string]$dirLogs) {
         FalhaInicio = Test-Marcador $stderr 'FALHA_INICIO'
         FalhaFim    = Test-Marcador $stderr 'FALHA_FIM'
         Parada      = $parada
+        Container   = $containerK6
     }
 }
 
 $consultasPrometheus = [ordered]@{
-    'cpu'                     = 'sum by (name) (rate(container_cpu_usage_seconds_total{name=~"marketplace-.+"}[15s]))'
-    'memoria'                 = 'max by (name) (container_memory_working_set_bytes{name=~"marketplace-.+"})'
+    'cpu'                     = 'sum by (id) (rate(container_cpu_usage_seconds_total{id=~"/docker/[0-9a-f]{64}"}[20s]))'
+    'memoria'                 = 'max by (id) (container_memory_working_set_bytes{id=~"/docker/[0-9a-f]{64}"})'
     'fila_prontas'            = 'sum by (queue) (rabbitmq_queue_messages_ready)'
     'fila_nao_confirmadas'    = 'sum by (queue) (rabbitmq_queue_messages_unacked)'
     'mensagens_processadas'   = 'sum by (queue, status) (message_processing_duration_seconds_count)'
@@ -289,9 +311,10 @@ function Export-Prometheus([string]$dir, [DateTime]$inicio, [DateTime]$fim) {
     }
 }
 
-function Get-CpuMaximaK6([DateTime]$inicio, [DateTime]$fim) {
+function Get-CpuMaximaK6([string]$containerK6, [DateTime]$inicio, [DateTime]$fim) {
+    if (-not $containerK6) { return $null }
     $segundos = [int][Math]::Ceiling(($fim - $inicio).TotalSeconds)
-    $consulta = "max(max_over_time(sum by (name) (rate(container_cpu_usage_seconds_total{name=~`"marketplace-k6.+`"}[15s]))[${segundos}s:5s]))"
+    $consulta = "max(max_over_time(sum(rate(container_cpu_usage_seconds_total{id=`"/docker/$containerK6`"}[20s]))[${segundos}s:5s]))"
     $resposta = Invoke-RestMethod -Method Get -Uri "$prometheus/api/v1/query" -Body @{ query = $consulta; time = Get-Utc $fim }
     if ($resposta.data.result.Count -eq 0) { return $null }
     return [double]$resposta.data.result[0].value[1]
@@ -326,6 +349,21 @@ function Get-Imagens {
     return $imagens
 }
 
+function Get-Containers {
+    $ids = [ordered]@{}
+    foreach ($container in $containersSut + @('marketplace-prometheus', 'marketplace-cadvisor')) {
+        $id = Invoke-Docker @('inspect', '-f', '{{.Id}}', $container) -IgnorarErro | Select-Object -Last 1
+        $ids[$container] = "$id".Trim()
+    }
+    return $ids
+}
+
+function Get-IdsComSerie([string]$arquivo) {
+    if (-not (Test-Path $arquivo)) { return @() }
+    $dados = Get-Content $arquivo -Raw | ConvertFrom-Json
+    return @($dados.data.result | ForEach-Object { "$($_.metric.id)" -replace '^/docker/', '' })
+}
+
 function Get-Reinicios {
     $estado = [ordered]@{}
     foreach ($container in $containersSut) {
@@ -336,7 +374,7 @@ function Get-Reinicios {
     return $estado
 }
 
-function Test-Execucao($dir, $k6, $drenagem, $reinicios, $cpuK6) {
+function Test-Execucao($dir, $k6, $drenagem, $reinicios, $cpuK6, $containers) {
     $motivos = @()
     if ($k6.Codigo -ne 0 -and $k6.Codigo -ne 99) {
         $motivos += "k6 terminou com código $($k6.Codigo)"
@@ -367,9 +405,19 @@ function Test-Execucao($dir, $k6, $drenagem, $reinicios, $cpuK6) {
             $motivos += "$container reiniciou ou sofreu OOM"
         }
     }
+    foreach ($serie in @('cpu', 'memoria')) {
+        $comSerie = Get-IdsComSerie (Join-Path $dir "prometheus\$serie.json")
+        $semSerie = @($containersSut | Where-Object { $comSerie -notcontains $containers[$_] })
+        if ($semSerie.Count -gt 0) {
+            $motivos += "série de $serie ausente para: $($semSerie -join ', ')"
+        }
+    }
     $limiteK6 = 2.0
     if ($env:K6_CPUS) { $limiteK6 = [double]$env:K6_CPUS }
-    if ($null -ne $cpuK6 -and $cpuK6 -gt 0.8 * $limiteK6) {
+    if ($null -eq $cpuK6) {
+        $motivos += 'CPU do k6 não foi medida'
+    }
+    elseif ($cpuK6 -gt 0.8 * $limiteK6) {
         $motivos += "CPU do k6 chegou a $([Math]::Round($cpuK6, 2)) núcleos (limite $limiteK6)"
     }
     return $motivos
@@ -378,22 +426,44 @@ function Test-Execucao($dir, $k6, $drenagem, $reinicios, $cpuK6) {
 function Invoke-Execucao($condicao, [int]$repeticao, [int]$posicao, $ambiente, $git) {
     $relativo = "experimentos/$Experimento/$($condicao.Nome)/rep-{0:D2}" -f $repeticao
     $dir = Join-Path $PSScriptRoot "results\$($relativo.Replace('/', '\'))"
+    if (Test-Path (Join-Path $dir 'metadata.json')) {
+        throw "$dir já tem uma execução concluída; apague a pasta ou use -RepeticaoInicial para continuar de outra repetição"
+    }
     if (Test-Path $dir) {
-        throw "$dir já existe; apague a pasta ou use -RepeticaoInicial para continuar de outra repetição"
+        $abortada = "$dir.abortada-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        Move-Item -Path $dir -Destination $abortada
+        Write-Warning "execução anterior incompleta movida para $abortada"
     }
     $dirLogs = Join-Path $dir 'logs'
     $dirProm = Join-Path $dir 'prometheus'
     $dirSql = Join-Path $dir 'sql'
     New-Item -ItemType Directory -Force -Path $dirLogs, $dirProm, $dirSql | Out-Null
 
-    Write-Host "$(Get-Date -Format HH:mm:ss) [$Experimento] $($condicao.Nome) rep ${repeticao}: preparando ambiente"
-    Reset-Ambiente $condicao
-    $imagens = Get-Imagens
+    $indice = Join-Path $saidaBase "$Experimento\execucoes.csv"
+    if (-not (Test-Path $indice)) {
+        Write-Texto $indice 'experimento,condicao,repeticao,posicao,inicio_utc,fim_utc,valida,motivos'
+    }
 
-    $inicio = (Get-Date).ToUniversalTime()
-    Write-Host "$(Get-Date -Format HH:mm:ss) [$Experimento] $($condicao.Nome) rep ${repeticao}: carga iniciada"
-    $k6 = Invoke-K6 $condicao $relativo $dirLogs
-    $fimCarga = (Get-Date).ToUniversalTime()
+    try {
+        Write-Host "$(Get-Date -Format HH:mm:ss) [$Experimento] $($condicao.Nome) rep ${repeticao}: preparando ambiente"
+        Reset-Ambiente $condicao
+        $imagens = Get-Imagens
+        $containers = Get-Containers
+
+        $inicio = (Get-Date).ToUniversalTime()
+        Write-Host "$(Get-Date -Format HH:mm:ss) [$Experimento] $($condicao.Nome) rep ${repeticao}: carga iniciada"
+        $k6 = Invoke-K6 $condicao $relativo $dirLogs
+        $fimCarga = (Get-Date).ToUniversalTime()
+    }
+    catch {
+        $erro = "$($_.Exception.Message)"
+        Write-Texto (Join-Path $dir 'erro.txt') $erro
+        $primeiraLinha = (($erro -split "`n")[0] -replace '"', "'").Trim()
+        $linha = '{0},{1},{2},{3},{4},{5},{6},"{7}"' -f $Experimento, $condicao.Nome, $repeticao, $posicao,
+            (Get-Utc (Get-Date)), (Get-Utc (Get-Date)), 'False', "abortada: $primeiraLinha"
+        [System.IO.File]::AppendAllText($indice, "$linha`n", $utf8)
+        throw
+    }
 
     Write-Host "$(Get-Date -Format HH:mm:ss) [$Experimento] $($condicao.Nome) rep ${repeticao}: drenando"
     $drenagem = Wait-Drenagem
@@ -401,7 +471,8 @@ function Invoke-Execucao($condicao, [int]$repeticao, [int]$posicao, $ambiente, $
     $fim = (Get-Date).ToUniversalTime()
 
     Export-Prometheus $dirProm $inicio.AddSeconds(-30) $fim
-    $cpuK6 = Get-CpuMaximaK6 $inicio $fimCarga
+    $cpuK6 = Get-CpuMaximaK6 $k6.Container $inicio $fimCarga
+    $containers["k6"] = $k6.Container
     Export-Sql (Join-Path $dirSql 'pedidos.csv') 'orders' 'SELECT id, status, total_cents, created_at, updated_at FROM orders'
     Export-Sql (Join-Path $dirSql 'pagamentos.csv') 'payments' 'SELECT id, order_id, status, failure_reason, created_at, updated_at FROM payments'
     Export-Sql (Join-Path $dirSql 'estoque.csv') 'inventory' 'SELECT product_id, available, reserved, updated_at FROM stock'
@@ -410,7 +481,7 @@ function Invoke-Execucao($condicao, [int]$repeticao, [int]$posicao, $ambiente, $
     Write-Texto (Join-Path $dirLogs 'servicos.log') (Invoke-Docker @('compose', '-f', $compose, 'logs', '--no-color', '--timestamps', 'catalog', 'orders', 'inventory', 'payments', 'toxiproxy') -IgnorarErro)
 
     $reinicios = Get-Reinicios
-    $motivos = @(Test-Execucao $dir $k6 $drenagem $reinicios $cpuK6)
+    $motivos = @(Test-Execucao $dir $k6 $drenagem $reinicios $cpuK6 $containers)
 
     $metadados = [ordered]@{
         experimento          = $Experimento
@@ -436,14 +507,11 @@ function Invoke-Execucao($condicao, [int]$repeticao, [int]$posicao, $ambiente, $
         motivos_invalidacao  = $motivos
         git                  = $git
         imagens              = $imagens
+        containers           = $containers
         ambiente             = $ambiente
     }
     Write-Texto (Join-Path $dir 'metadata.json') ($metadados | ConvertTo-Json -Depth 6)
 
-    $indice = Join-Path $saidaBase "$Experimento\execucoes.csv"
-    if (-not (Test-Path $indice)) {
-        Write-Texto $indice 'experimento,condicao,repeticao,posicao,inicio_utc,fim_utc,valida,motivos'
-    }
     $linha = '{0},{1},{2},{3},{4},{5},{6},"{7}"' -f $Experimento, $condicao.Nome, $repeticao, $posicao,
         (Get-Utc $inicio), (Get-Utc $fim), $metadados.valida, (($motivos -join '; ') -replace '"', "'")
     [System.IO.File]::AppendAllText($indice, "$linha`n", $utf8)

@@ -18,8 +18,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "sum(rate(container_cpu_usage_seconds_total{name=~\"marketplace-.+\"}[1m])) by (name) * 100",
-          "legendFormat": "{{name}}"
+          "expr": "sum(rate(container_cpu_usage_seconds_total{id=~\"/docker/[0-9a-f]{64}\"}[1m])) by (id) * 100",
+          "legendFormat": "{{id}}"
         }
       ]
     },
@@ -33,8 +33,8 @@
       "targets": [
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "expr": "container_memory_working_set_bytes{name=~\"marketplace-.+\"}",
-          "legendFormat": "{{name}}"
+          "expr": "container_memory_working_set_bytes{id=~\"/docker/[0-9a-f]{64}\"}",
+          "legendFormat": "{{id}}"
         }
       ]
     }

@@ -319,8 +319,15 @@ Para exportar os dados de um painel: menu do painel → *Inspect* → *Data* →
 | Tentativas ao catálogo por resultado | `sum by (outcome) (increase(catalog_client_requests_total[5m]))` |
 | Mensagens na fila (prontas + em processamento) | `sum by (queue) (rabbitmq_queue_messages_ready) + sum by (queue) (rabbitmq_queue_messages_unacked)` |
 | Mecanismos ativos | `max by (job, mechanism) (resilience_mechanism_enabled)` |
-| CPU por container | `sum by (name) (rate(container_cpu_usage_seconds_total{name=~"marketplace-.+"}[1m]))` |
-| Memória por container | `container_memory_working_set_bytes{name=~"marketplace-.+"}` |
+| CPU por container | `sum by (id) (rate(container_cpu_usage_seconds_total{id=~"/docker/[0-9a-f]{64}"}[1m]))` |
+| Memória por container | `container_memory_working_set_bytes{id=~"/docker/[0-9a-f]{64}"}` |
+
+O cAdvisor roda sem acesso ao Docker. Com o image store do containerd (padrão
+do Docker Desktop atual) ele não reconhece os containers pelo nome e descarta
+as séries; lendo só os cgroups, cada container aparece como
+`id="/docker/<id completo>"`. Para saber quem é quem:
+`docker ps --no-trunc --format "{{.ID}} {{.Names}}"`. O `experimento.ps1` grava
+esse mapa em `metadata.json` (`containers`).
 
 Série temporal de um experimento pela API (horários em UTC):
 

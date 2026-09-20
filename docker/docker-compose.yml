@@ -60,11 +60,11 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_port_connectivity"]
+      interval: 5s
+      timeout: 15s
+      retries: 30
+      start_period: 30s
     cpus: ${RABBITMQ_CPUS:-1.0}
     mem_limit: ${RABBITMQ_MEMORY:-1g}
     restart: unless-stopped
@@ -206,14 +206,13 @@ services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.49.1
     container_name: marketplace-cadvisor
+    command: ["--housekeeping_interval=5s", "--allow_dynamic_housekeeping=false"]
     privileged: true
     ports:
       - "${CADVISOR_PORT:-8085}:8080"
     volumes:
       - /:/rootfs:ro
-      - /var/run:/var/run:ro
       - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
     cpus: ${CADVISOR_CPUS:-0.5}
     mem_limit: ${CADVISOR_MEMORY:-256m}
     restart: unless-stopped
