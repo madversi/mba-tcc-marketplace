@@ -19,6 +19,7 @@ scrape_configs:
       - targets: ["payments:8080"]
 
   - job_name: cadvisor
+    honor_timestamps: false
     static_configs:
       - targets: ["cadvisor:8080"]
 
