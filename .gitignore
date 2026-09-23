@@ -18,3 +18,13 @@ Thumbs.db
 *.log
 
 load-tests/results/
+load-tests/results_antigos_*/
+
+# saidas da analise (dados do experimento, publicados separadamente)
+analise/consolidado/
+analise/figuras/
+analise/janelas/
+analise/pedidos/
+analise/piloto/
+analise/tabelas/
+analise/execucoes.csv
