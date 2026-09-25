@@ -3,13 +3,14 @@
 Projeto de TCC (MBA em Engenharia de Software) — implementação de um back-end de
 marketplace fictício em Rust, dividido em microsserviços que se comunicam via
 mensageria assíncrona (RabbitMQ), com padrões de resiliência (retry, timeout,
-circuit breaker e fallback), voltado à coleta de métricas de desempenho.
+circuit breaker e fallback).
 
 **Aluno:** Helder Marcelo Adversi Junior
 **Orientadora:** Elaine Barbosa de Figueiredo
 
-Este README é o guia operacional: como subir o ambiente, rodar os cenários de
-carga e coletar as métricas.
+O protocolo experimental e o registro da coleta estão em
+[`docs/piloto.md`](docs/piloto.md) e [`docs/coleta.md`](docs/coleta.md). O código
+medido corresponde à tag [`experimento-v1`](../../tree/experimento-v1).
 
 ## Visão geral
 
@@ -57,10 +58,12 @@ a camada de dependências (`cargo-chef`). Os serviços aplicam as próprias
 migrations ao subir. Para sobrescrever portas, credenciais e limites, copie
 `docker/.env.example` para `docker/.env`.
 
+As credenciais e portas padrão são de desenvolvimento, e as portas são publicadas
+em todas as interfaces do host: use o ambiente apenas em máquina local.
+
 Todos os containers têm limite de CPU e memória, e PostgreSQL, RabbitMQ e
-Toxiproxy estão fixados por digest, para que as medições sejam comparáveis entre
-execuções. O Grafana fica fora da subida padrão (não disputa recursos durante a
-coleta); para inspecionar os painéis:
+Toxiproxy estão fixados por digest. O Grafana fica fora da subida padrão; para
+inspecionar os painéis:
 `docker compose -f docker/docker-compose.yml --profile grafana up -d grafana`.
 
 Para derrubar mantendo os dados: `docker compose -f docker/docker-compose.yml down`.
@@ -83,7 +86,7 @@ curl localhost:8084/payments/order/<ORDER_ID>  # APPROVED
 
 No PowerShell use `curl.exe` e escape as aspas do JSON (`\"`).
 
-## Configuração dos experimentos
+## Configuração
 
 Os serviços leem a configuração de variáveis de ambiente. As que não aparecem no
 `docker/docker-compose.yml` podem ser adicionadas em `environment:` do serviço.
@@ -98,7 +101,7 @@ Os serviços leem a configuração de variáveis de ambiente. As que não aparec
 | `PAYMENT_REPROCESS_ENABLED` | payments | `true` | Desligado: gateway fora falha o pagamento na hora, sem `payment.pending` |
 | `AMQP_CONSUMER_CONCURRENCY` | todos | `1` | Mensagens processadas em paralelo por fila (o prefetch sobe junto) |
 | `TOKIO_WORKER_THREADS` | todos | `2` no compose | Threads do runtime Tokio |
-| `SERVICE_CPUS` / `SERVICE_MEMORY` | compose | `1.0` / `256m` | Limites dos 4 serviços Rust (há variáveis equivalentes para Postgres, RabbitMQ, Toxiproxy e k6) |
+| `SERVICE_CPUS` / `SERVICE_MEMORY` | compose | `1.0` / `256m` | Limites dos 4 serviços Rust (há variáveis equivalentes para Postgres, RabbitMQ e Toxiproxy) |
 | `FAILURE_RATE` | payments | `0` | Chance (0–1) de o gateway ficar indisponível |
 | `LATENCY_MS` | payments | `0` | Atraso artificial por cobrança |
 | `UNAVAILABLE` | payments | `false` | Força o gateway indisponível |
@@ -118,8 +121,7 @@ Os serviços leem a configuração de variáveis de ambiente. As que não aparec
 | `LOG_LEVEL` / `LOG_FORMAT` | todos | `info` / `pretty` (`json` no compose) | Logs estruturados |
 
 Cada serviço registra no log, ao subir, a configuração efetiva de resiliência e
-expõe a métrica `resilience_mechanism_enabled{mechanism}` (0 ou 1), usada para
-conferir a condição de cada execução.
+expõe a métrica `resilience_mechanism_enabled{mechanism}` (0 ou 1).
 
 O gateway também pode ser alterado em tempo de execução:
 
@@ -143,153 +145,7 @@ cargo test --workspace
 Cada teste de mensageria usa um exchange próprio (`shared::testing::IsolatedBroker`),
 então a suíte pode rodar em paralelo.
 
-## Testes de carga (k6)
-
-O k6 roda em um container na rede do compose (profile `load`), sem instalação
-local. Os scripts ficam em `load-tests/` e os resultados em `load-tests/results/`
-(ignorado pelo Git).
-
-```bash
-docker compose -f docker/docker-compose.yml --profile load run --rm k6 run \
-  --summary-trend-stats "avg,min,med,p(90),p(95),p(99),max" \
-  --summary-export /results/baseline-01.json \
-  /scripts/baseline.js
-```
-
-Parâmetros vão como variáveis de ambiente antes do nome do serviço, por exemplo
-`run --rm -e RATE=25 -e DURATION=5m k6 run ...`.
-
-| Cenário | O que mede | Duração padrão | Parâmetros |
-|---|---|---|---|
-| `baseline.js` | Comportamento saudável sob carga constante | 1 min de aquecimento + 2 min | `RATE` (10), `AQUECIMENTO`, `DURATION` |
-| `stress.js` | Ponto de degradação, em patamares até o pico | ~13 min | `PEAK_RATE` (200), `LEVELS`, `RAMP`, `HOLD` |
-| `spike.js` | Reação a um pico súbito e recuperação | ~4 min | `BASE_RATE` (10), `SPIKE_RATE` (150), `SPIKE_HOLD`, `RECOVERY` |
-| `falhas.js` | Resiliência com falhas injetadas | 6 min | `FALHA`, `RATE`, `AQUECIMENTO`, `WARMUP`, `FAILURE_WINDOW`, `RECOVERY` |
-
-Todos os cenários usam carga em modelo aberto (taxa de chegada fixa) e marcam
-cada requisição com a fase em que ela ocorreu (`aquecimento`, `antes`, `falha`,
-`depois`, ...). A fase de aquecimento deve ser descartada na análise.
-
-**Tempo das sagas:** por padrão o k6 não acompanha as sagas (`SAGA_SAMPLE=0`).
-Consultar `GET /orders/{id}` em loop gera carga proporcional à duração das
-sagas, justamente o que se quer medir. O tempo de conclusão sai do banco
-(`orders.updated_at` do estado final − `orders.created_at`), para todos os
-pedidos. `SAGA_SAMPLE` > 0 volta a ligar as métricas `saga_duration` e
-`saga_confirmed` no k6, só para inspeção manual.
-
-**Leitura dos resultados:** os SLOs são avaliados por fase (POST com p95 < 500 ms
-e menos de 1% de erro). É esperado que stress, spike e falhas terminem com
-thresholds violados (código de saída 99): o resultado é *em qual fase* isso
-acontece.
-
-### Cenários de falha
-
-Cada execução tem 1 min de aquecimento, 1 min normal, 1 min de falha e 3 min de
-recuperação.
-
-| `FALHA` | Injeção |
-|---|---|
-| `catalogo-lento` | Toxiproxy atrasa as respostas do catálogo (`CATALOG_LATENCY_MS`, padrão 2000) |
-| `catalogo-indisponivel` | Toxiproxy desliga o proxy do catálogo (conexão recusada) |
-| `catalogo-instavel` | Toxiproxy reseta conexões com probabilidade `TOXICITY` (padrão 0.3) |
-| `gateway-indisponivel` | Gateway recusa todas as cobranças |
-| `gateway-instavel` | `FAILURE_RATE` (padrão 0.5) |
-| `gateway-lento` | `LATENCY_MS` (padrão 2000) |
-| `servico-parado` | Container de `catalog`, `inventory` ou `payments` parado |
-
-O Toxiproxy aplica falhas por conexão, e o cliente HTTP reaproveita conexões. Por
-isso a taxa efetiva de falhas do `catalogo-instavel` deve ser lida na métrica
-`catalog_client_requests_total{outcome}`, não presumida a partir de `TOXICITY`.
-
-Falhas no gateway e no catálogo são aplicadas pelo próprio k6, via endpoint admin
-e API do Toxiproxy:
-
-```bash
-docker compose -f docker/docker-compose.yml --profile load run --rm \
-  -e FALHA=gateway-indisponivel k6 run --summary-export /results/gateway-indisponivel-01.json \
-  /scripts/falhas.js
-```
-
-Parar containers exige o host, então usa o script PowerShell (que exporta o
-resumo em `load-tests/results/` automaticamente):
-
-```powershell
-.\load-tests\falha-servico.ps1 -Servico catalog
-```
-
-O k6 imprime marcadores no início e no fim da janela de falha, e o script para
-(`docker compose stop -t 0`) e religa o container ao vê-los. Se o teste for
-interrompido, o gateway é restaurado e o container é religado.
-
-## Execução dos experimentos
-
-`load-tests/experimento.ps1` executa o protocolo completo de cada experimento do
-TCC. Para cada execução ele:
-
-1. Recria bancos, filas e serviços do zero com a configuração da condição.
-2. Roda o k6 salvando cada requisição (`k6.csv.gz`) e o resumo (`summary.json`).
-3. Espera a drenagem: nenhum pedido fora de `CONFIRMED`/`CANCELLED` e nenhuma
-   mensagem pendente (exceto nas filas `.dead`).
-4. Exporta as séries do Prometheus, as tabelas do banco e os logs.
-5. Grava os metadados e valida a execução.
-
-```powershell
-.\load-tests\experimento.ps1 -Experimento 2A -Repeticoes 10 -Taxa 20
-.\load-tests\experimento.ps1 -Experimento 1A -Repeticoes 5 -Taxas 10,20,40,60,80,100
-.\load-tests\experimento.ps1 -Experimento 3A -Repeticoes 3 -Condicoes R-ON   # só uma condição (piloto)
-```
-
-| Experimento | Condições | Falha |
-|---|---|---|
-| `1A` | uma por taxa em `-Taxas` (tudo ligado) | — |
-| `1B` | `C0-ROFF` (tudo desligado) × `C4-RON` (tudo ligado) | — |
-| `2A` | `C0` a `C4` | `catalogo-lento` |
-| `2B` | `C0`, `C2`, `C3`, `C4` | `catalogo-indisponivel` |
-| `3A` | `R-ON` × `R-OFF` | `gateway-indisponivel` |
-| `4A` | `parado-<servico>` (`-ServicoParado`, padrão `payments`) | `servico-parado` |
-
-Níveis do cliente do catálogo, cumulativos:
-
-| Nível | Timeout | Retry | Circuit breaker | Fallback |
-|---|---|---|---|---|
-| `C0` | — | — | — | — |
-| `C1` | ✓ | — | — | — |
-| `C2` | ✓ | ✓ | — | — |
-| `C3` | ✓ | ✓ | ✓ | — |
-| `C4` | ✓ | ✓ | ✓ | ✓ |
-
-Cada repetição é um bloco com todas as condições em ordem sorteada (`-Semente`,
-registrada). `-RepeticaoInicial` continua uma série interrompida sem repetir o
-sorteio dos blocos anteriores. As imagens são reconstruídas no início (`-SemBuild`
-pula). Se houver alterações sem commit, o script avisa: o hash registrado não
-descreveria exatamente o código medido.
-
-Resultados em `load-tests/results/experimentos/<exp>/<condição>/rep-NN/`:
-
-| Arquivo | Conteúdo |
-|---|---|
-| `k6.csv.gz` | Uma linha por amostra de cada métrica do k6, com a tag `phase` |
-| `summary.json` | Resumo do k6 (percentis por fase) |
-| `sql/pedidos.csv` | Pedidos com estado final, `created_at` e `updated_at` |
-| `sql/pagamentos.csv`, `sql/estoque.csv`, `sql/reservas.csv`, `sql/resultados_reserva.csv` | Estado final para os invariantes de consistência |
-| `prometheus/*.json` | Séries de CPU, memória (working set), filas, mensagens, breaker, fallback, tentativas ao catálogo, reprocessamento e mecanismos ativos |
-| `logs/` | Saída do k6 e logs JSON dos serviços (incluem as transições do circuit breaker) |
-| `metadata.json` | Condição, horários UTC (início, falha, fim), parâmetros, commit, imagens, hardware, drenagem e validade |
-
-`<exp>/execucoes.csv` lista todas as execuções com a indicação de validade.
-Uma execução é marcada como inválida, sem ser apagada, se:
-
-- o k6 terminou com código diferente de 0 ou 99 (99 = thresholds violados, esperado nas falhas);
-- mais de 1% das iterações foram descartadas pelo k6 (`-LimiteDescarte`);
-- algum comando de controle (injeção de falha) falhou;
-- a drenagem não terminou em `-DrenagemMaxSegundos`;
-- algum container reiniciou ou sofreu OOM;
-- a CPU do k6 passou de 80% do seu limite.
-
-Antes de rodar: pare o PostgreSQL nativo do Windows se estiver ativo, feche
-programas pesados e mantenha o notebook na tomada.
-
-## Coleta de métricas
+## Observabilidade
 
 ### Grafana
 
@@ -300,9 +156,6 @@ Pasta **Marketplace**, com três dashboards provisionados:
 - **Recursos por Container** — CPU e memória de cada container (cAdvisor).
 - **Resiliencia** — estado e transições dos circuit breakers, tempo de
   reprocessamento, ativações do fallback, retries e mensagens na fila dead.
-
-Para exportar os dados de um painel: menu do painel → *Inspect* → *Data* →
-*Download CSV*, com o intervalo de tempo do experimento selecionado.
 
 ### Prometheus
 
@@ -326,24 +179,7 @@ O cAdvisor roda sem acesso ao Docker. Com o image store do containerd (padrão
 do Docker Desktop atual) ele não reconhece os containers pelo nome e descarta
 as séries; lendo só os cgroups, cada container aparece como
 `id="/docker/<id completo>"`. Para saber quem é quem:
-`docker ps --no-trunc --format "{{.ID}} {{.Names}}"`. O `experimento.ps1` grava
-esse mapa em `metadata.json` (`containers`).
-
-Série temporal de um experimento pela API (horários em UTC):
-
-```bash
-curl -G localhost:9090/api/v1/query_range \
-  --data-urlencode 'query=max by (breaker) (circuit_breaker_state)' \
-  --data-urlencode 'start=2026-09-15T10:00:00Z' \
-  --data-urlencode 'end=2026-09-15T10:05:00Z' \
-  --data-urlencode 'step=5s'
-```
-
-Para os experimentos do TCC, use o `experimento.ps1`, que exporta essas séries
-automaticamente. O Grafana serve só para inspeção visual.
-
-O container do k6 aparece no cAdvisor: o consumo do gerador de carga fica
-separado do consumo dos serviços, mas divide a mesma máquina.
+`docker ps --no-trunc --format "{{.ID}} {{.Names}}"`.
 
 ## Solução de problemas
 
@@ -363,9 +199,6 @@ docker exec marketplace-rabbitmq sh -c 'for q in $(rabbitmqctl list_queues -s na
 **Porta 5432 ocupada** — defina `POSTGRES_PORT=5433` em `docker/.env` e ajuste a
 `DATABASE_URL` do `.env` da raiz.
 
-**k6 sem permissão para gravar em `/results` (Linux)** — a pasta criada pelo
-Docker pertence ao root: `mkdir -p load-tests/results && chmod 777 load-tests/results`.
-
 **Painéis sem dados** — confira os alvos em http://localhost:9090/targets; as
 consultas com `rate()` precisam de tráfego e de pelo menos dois scrapes.
 
@@ -380,7 +213,7 @@ consultas com `rate()` precisam de tráfego e de pelo menos dois scrapes.
   (`AMQP_CONSUMER_CONCURRENCY=1`). Com `LATENCY_MS` alto, o processamento de
   pagamentos vira gargalo e as filas acumulam.
 - Não há reconexão ao RabbitMQ: se o broker cair, os consumidores param até o
-  serviço ser reiniciado. Falha do broker fica fora dos experimentos.
+  serviço ser reiniciado.
 - O gateway de pagamento é simulado dentro do próprio `payments`; o breaker do
   gateway não passa por rede.
 - A cobrança no gateway não tem timeout; o timeout só existe na chamada ao
