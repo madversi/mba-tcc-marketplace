@@ -207,9 +207,9 @@ e 10 000 reamostragens), na raiz do repositório:
 
 ```powershell
 pip install numpy pandas scipy
-powershell -ExecutionPolicy Bypass -File analise\tabelas.ps1   # tabelas\tabela4.csv a tabela7.csv e figuras\figura2, 3 e 5.csv
-python analise\estatistica.py    # tabelas\estatistica_*.csv e os intervalos da tabela5
-python analise\complementar.py   # tabelas\complementar_sensibilidade.csv e complementar_pontos_por_execucao.csv
+powershell -ExecutionPolicy Bypass -File analise\tabelas.ps1   # analise\tabelas\tabela4.csv a tabela7.csv e analise\figuras\figura2, 3 e 5.csv
+python analise\estatistica.py    # analise\tabelas\estatistica_*.csv e os intervalos da tabela5
+python analise\complementar.py   # analise\tabelas\complementar_sensibilidade.csv e complementar_pontos_por_execucao.csv
 ```
 
 `analise/extrair.ps1` produz `consolidado/`, `janelas/`, `pedidos/` e
