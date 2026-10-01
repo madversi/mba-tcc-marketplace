@@ -1,5 +1,6 @@
 /target/
 **/target/
+__pycache__/
 Cargo.lock.bak
 
 .env
@@ -20,11 +21,10 @@ Thumbs.db
 load-tests/results/
 load-tests/results_antigos_*/
 
-# saidas da analise (dados do experimento, publicados separadamente)
-analise/consolidado/
+# saidas da analise que nao sao publicadas: tabelas de pedidos, piloto e dados
+# das figuras (os dados brutos por execucao ficam em load-tests/results/, acima).
+# Os resumos por execucao (consolidado/, janelas/, execucoes.csv) e as tabelas/
+# sao versionados.
 analise/figuras/
-analise/janelas/
 analise/pedidos/
 analise/piloto/
-analise/tabelas/
-analise/execucoes.csv

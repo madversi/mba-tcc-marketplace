@@ -9,6 +9,8 @@ circuit breaker e fallback).
 **Orientadora:** Elaine Barbosa de Figueiredo
 
 O código medido corresponde à tag [`experimento-v1`](../../tree/experimento-v1).
+Os resumos por execução e a reprodução da análise estão descritos em
+[Dados do experimento e reprodução da análise](#dados-do-experimento-e-reprodução-da-análise).
 
 ## Visão geral
 
@@ -178,6 +180,45 @@ do Docker Desktop atual) ele não reconhece os containers pelo nome e descarta
 as séries; lendo só os cgroups, cada container aparece como
 `id="/docker/<id completo>"`. Para saber quem é quem:
 `docker ps --no-trunc --format "{{.ID}} {{.Names}}"`.
+
+## Dados do experimento e reprodução da análise
+
+A pasta `analise/` reúne os scripts de consolidação e de análise e os resumos
+por execução da coleta de 23 e 24 de setembro de 2026 (77 execuções, 76
+válidas, todas com o código da tag `experimento-v1`):
+
+| Caminho | Conteúdo |
+|---|---|
+| `analise/execucoes.csv` | Uma linha por execução: experimento, condição, repetição e posição no bloco, início e fim (UTC), validade e motivo de descarte, CPU máxima do k6, tempo de drenagem, commit medido e indicação de alterações não commitadas |
+| `analise/consolidado/<experimento>.csv` | Resumos por execução e fase (requisições, erros, latências, vazão, sagas, CPU e memória por container): a unidade estatística do trabalho |
+| `analise/janelas/<experimento>.csv` | Séries por janela de 5 s de cada execução (requisições, erros, latências, fila, sagas e estado dos circuit breakers) |
+| `analise/tabelas/` | Tabelas 4 a 7 do texto (`tabela*.csv`), medianas, intervalos e testes (`estatistica_*.csv`) e a análise complementar (`complementar_*.csv`) |
+
+Não estão publicados os dados brutos de cada execução (`load-tests/results/`,
+mais de 200 MB com a saída do k6, as tabelas do banco, as métricas e os logs),
+as tabelas de pedidos extraídas deles (`analise/pedidos/`), o piloto
+(`analise/piloto/`) e a pasta `analise/figuras/` (CSVs, PNGs e PDFs das
+figuras; os CSVs das figuras 2, 3 e 5 são refeitos pelo comando abaixo, e o da
+figura 4 depende de `analise/pedidos/3A.csv`).
+
+Para refazer as tabelas e os testes estatísticos a partir dos resumos (Windows
+PowerShell 5.1 e Python 3.12 com NumPy, pandas e SciPy; semente fixa 20260917
+e 10 000 reamostragens), na raiz do repositório:
+
+```powershell
+pip install numpy pandas scipy
+powershell -ExecutionPolicy Bypass -File analise\tabelas.ps1   # tabelas\tabela4.csv a tabela7.csv e figuras\figura2, 3 e 5.csv
+python analise\estatistica.py    # tabelas\estatistica_*.csv e os intervalos da tabela5
+python analise\complementar.py   # tabelas\complementar_sensibilidade.csv e complementar_pontos_por_execucao.csv
+```
+
+`analise/extrair.ps1` produz `consolidado/`, `janelas/`, `pedidos/` e
+`execucoes.csv` a partir dos dados brutos, e `complementar.py` só refaz
+`complementar_1A_por_execucao.csv` (fila, pedidos pendentes e conclusão de
+sagas por execução do 1A) quando encontra os `pedidos.csv` brutos do 1A em
+`load-tests/results/experimentos` ou no caminho passado em `--resultados`.
+`decisao_taxa.ps1` aplica a regra de escolha da taxa nominal ao consolidado do
+piloto.
 
 ## Solução de problemas
 
