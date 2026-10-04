@@ -1,7 +1,7 @@
-experimento,fase,metrica,n_C2,n_C3,mediana_C2,mediana_C3,U_C3,p,delta_cliff_C3_vs_C2
-2A,falha,erro_pct,5,6,94.333333,100.0,30.0,0.0022366244452098707,1.0
-2A,falha,lat_p95_ms,5,6,3307.280382,3306.5733085,0.0,0.004329004329004329,-1.0
-2A,falha,fator_amplificacao,5,6,2.756667,0.7575000000000001,0.0,0.007969413024121784,-1.0
-2A,falha,fallback_pct_201,5,0,,,,,
-2A,execucao,cb_catalogo_primeira_abertura_s,0,6,,,,,
-2A,execucao,recuperacao_s,5,6,0.002,10.003,25.5,0.06414661873440437,0.7
+experimento,fase,metrica,n_C2,n_C3,mediana_C2,mediana_C3,U_C3,p,delta_cliff_C3_vs_C2,p_holm_h2
+2A,falha,erro_pct,5,6,94.333333,100.0,30.0,0.004329004329004329,1.0,
+2A,falha,lat_p95_ms,5,6,3307.280382,3306.5733085,0.0,0.004329004329004329,-1.0,0.008658008658008658
+2A,falha,fator_amplificacao,5,6,2.756667,0.7575000000000001,0.0,0.004329004329004329,-1.0,0.008658008658008658
+2A,falha,fallback_pct_201,5,0,,,,,,
+2A,execucao,cb_catalogo_primeira_abertura_s,0,6,,,,,,
+2A,execucao,recuperacao_s,5,6,0.002,10.003,25.5,0.08225108225108226,0.7,

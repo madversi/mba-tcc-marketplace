@@ -119,12 +119,17 @@ def main():
                 x2, x3 = valores(df, "C2", fase, metrica), valores(df, "C3", fase, metrica)
                 linha = {"experimento": exp, "fase": fase, "metrica": metrica, "n_C2": len(x2), "n_C3": len(x3)}
                 if len(x2) > 0 and len(x3) > 0:
-                    res = stats.mannwhitneyu(x3, x2, alternative="two-sided", method="auto")
+                    res = stats.mannwhitneyu(x3, x2, alternative="two-sided", method="exact")
                     u = res.statistic
                     delta = 2 * u / (len(x2) * len(x3)) - 1
                     linha.update(mediana_C2=np.median(x2), mediana_C3=np.median(x3), U_C3=u, p=res.pvalue,
                                  delta_cliff_C3_vs_C2=delta)
                 mw.append(linha)
+
+    h2 = [i for i, l in enumerate(mw) if l["fase"] == "falha" and l["metrica"] in ("lat_p95_ms", "fator_amplificacao") and "p" in l]
+    if len(h2) == 2:
+        for i, pa in zip(h2, holm([mw[i]["p"] for i in h2])):
+            mw[i]["p_holm_h2"] = pa
 
     saida = base / "tabelas"
     saida.mkdir(parents=True, exist_ok=True)

@@ -202,7 +202,7 @@ figuras; os CSVs das figuras 2, 3 e 5 são refeitos pelo comando abaixo, e o da
 figura 4 depende de `analise/pedidos/3A.csv`).
 
 Para refazer as tabelas e os testes estatísticos a partir dos resumos (Windows
-PowerShell 5.1 e Python 3.12 com NumPy, pandas e SciPy; semente fixa 20260917
+PowerShell 5.1 e Python 3.12 com NumPy, pandas e SciPy 1.18.1; semente fixa 20260917
 e 10 000 reamostragens), na raiz do repositório:
 
 ```powershell
